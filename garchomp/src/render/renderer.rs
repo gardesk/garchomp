@@ -50,6 +50,49 @@ impl Default for BlurConfig {
     }
 }
 
+/// Intermediate render target for multi-pass rendering.
+struct IntermediateTarget {
+    texture: wgpu::Texture,
+    view: wgpu::TextureView,
+    width: u32,
+    height: u32,
+}
+
+impl IntermediateTarget {
+    fn new(device: &wgpu::Device, width: u32, height: u32, format: wgpu::TextureFormat) -> Self {
+        let texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("intermediate_render_target"),
+            size: wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                | wgpu::TextureUsages::TEXTURE_BINDING
+                | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+
+        Self {
+            texture,
+            view,
+            width,
+            height,
+        }
+    }
+
+    fn resize(&mut self, device: &wgpu::Device, width: u32, height: u32, format: wgpu::TextureFormat) {
+        if self.width != width || self.height != height {
+            *self = Self::new(device, width, height, format);
+        }
+    }
+}
+
 /// The main renderer for the compositor.
 pub struct Renderer {
     pub gpu: GpuContext,
@@ -64,6 +107,8 @@ pub struct Renderer {
     test_texture: Option<WindowRenderData>,
     // Bind groups for windows (keyed by window ID)
     window_bind_groups: HashMap<u32, wgpu::BindGroup>,
+    // Intermediate render target for multi-pass rendering (blur support)
+    intermediate_texture: Option<IntermediateTarget>,
 }
 
 impl Renderer {
@@ -102,6 +147,7 @@ impl Renderer {
             },
             test_texture: Some(test_texture),
             window_bind_groups: HashMap::new(),
+            intermediate_texture: None,
         })
     }
 
@@ -184,6 +230,8 @@ impl Renderer {
     /// Resize the render surface.
     pub fn resize(&mut self, width: u32, height: u32) {
         self.gpu.resize(width, height);
+        // Invalidate intermediate texture so it gets recreated at new size
+        self.intermediate_texture = None;
     }
 
     /// Set the clear color (background).
@@ -262,6 +310,19 @@ impl Renderer {
             }
         }
 
+        // Check if any window needs blur
+        let needs_blur = self.blur_config.enabled
+            && windows.iter().any(|w| w.blur_behind);
+
+        if needs_blur {
+            self.render_windows_with_blur(windows)
+        } else {
+            self.render_windows_simple(windows)
+        }
+    }
+
+    /// Simple render path when no blur is needed.
+    fn render_windows_simple(&mut self, windows: &[WindowRenderInfo]) -> Result<(), GpuError> {
         let frame = self.gpu.begin_frame()?;
         let view = frame.texture.create_view(&wgpu::TextureViewDescriptor::default());
 
@@ -320,6 +381,205 @@ impl Renderer {
                     );
 
                     self.pipeline.render(&mut render_pass, bind_group);
+                }
+            }
+        }
+
+        self.gpu.end_frame(encoder, frame);
+        Ok(())
+    }
+
+    /// Render path with blur support for transparent windows.
+    fn render_windows_with_blur(&mut self, windows: &[WindowRenderInfo]) -> Result<(), GpuError> {
+        let (vw, vh) = self.gpu.dimensions();
+        let format = self.gpu.format();
+
+        // Ensure intermediate texture exists and is correct size
+        if self.intermediate_texture.is_none() {
+            self.intermediate_texture = Some(IntermediateTarget::new(
+                &self.gpu.device,
+                vw,
+                vh,
+                format,
+            ));
+        } else if let Some(ref mut it) = self.intermediate_texture {
+            it.resize(&self.gpu.device, vw, vh, format);
+        }
+
+        // Get frame surface
+        let frame = self.gpu.begin_frame()?;
+        let surface_view = frame.texture.create_view(&wgpu::TextureViewDescriptor::default());
+
+        let mut encoder = self.gpu.create_encoder();
+
+        // Get intermediate target view (we need to reborrow after encoder creation)
+        let intermediate_view = &self.intermediate_texture.as_ref().unwrap().view;
+
+        // Phase 1: Render shadows and non-blur windows to intermediate
+        {
+            let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("composite_phase1"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: intermediate_view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(self.clear_color),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+
+            // Render shadows for all windows
+            for win in windows {
+                if win.shadow_enabled {
+                    self.shadow_pipeline.update_uniforms(
+                        &self.gpu.queue,
+                        win.x as f32,
+                        win.y as f32,
+                        win.width as f32,
+                        win.height as f32,
+                        vw as f32,
+                        vh as f32,
+                        win.corner_radius,
+                        &self.shadow_config,
+                    );
+                    self.shadow_pipeline.render(&mut render_pass);
+                }
+            }
+
+            // Render windows that don't need blur
+            for win in windows {
+                if !win.blur_behind {
+                    if let Some(bind_group) = self.window_bind_groups.get(&win.id) {
+                        self.pipeline.update_uniforms(
+                            &self.gpu.queue,
+                            win.x as f32,
+                            win.y as f32,
+                            win.width as f32,
+                            win.height as f32,
+                            vw as f32,
+                            vh as f32,
+                            win.opacity,
+                            win.corner_radius,
+                        );
+                        self.pipeline.render(&mut render_pass, bind_group);
+                    }
+                }
+            }
+        }
+        // Render pass ends here, intermediate texture now contains background
+
+        // Phase 2: Apply blur and render blur windows
+        // Run blur on the intermediate texture
+        let blur_iterations = self.blur_config.iterations;
+        let blur_strength = self.blur_config.strength;
+
+        let blurred_view = self.blur_pipeline.blur(
+            &self.gpu.device,
+            &self.gpu.queue,
+            &mut encoder,
+            intermediate_view,
+            vw,
+            vh,
+            blur_iterations,
+            blur_strength,
+        );
+
+        // Create bind group for blurred texture (if available) before render pass
+        let blur_bind_group = blurred_view.map(|view| {
+            self.pipeline.create_bind_group(&self.gpu.device, view)
+        });
+
+        // Phase 3: Final composition to surface
+        // We need to composite: background + blurred regions + blur windows
+        {
+            let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("composite_final"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &surface_view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(self.clear_color),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+
+            // Re-render shadows
+            for win in windows {
+                if win.shadow_enabled {
+                    self.shadow_pipeline.update_uniforms(
+                        &self.gpu.queue,
+                        win.x as f32,
+                        win.y as f32,
+                        win.width as f32,
+                        win.height as f32,
+                        vw as f32,
+                        vh as f32,
+                        win.corner_radius,
+                        &self.shadow_config,
+                    );
+                    self.shadow_pipeline.render(&mut render_pass);
+                }
+            }
+
+            // Render all windows, using blurred background for blur_behind windows
+            for win in windows {
+                if win.blur_behind {
+                    // First draw blurred background in window region
+                    if let Some(ref bg) = blur_bind_group {
+                        // Draw blurred background in window region
+                        self.pipeline.update_uniforms(
+                            &self.gpu.queue,
+                            win.x as f32,
+                            win.y as f32,
+                            win.width as f32,
+                            win.height as f32,
+                            vw as f32,
+                            vh as f32,
+                            1.0, // Opaque blur background
+                            win.corner_radius,
+                        );
+                        self.pipeline.render(&mut render_pass, bg);
+                    }
+
+                    // Then draw the transparent window on top
+                    if let Some(bind_group) = self.window_bind_groups.get(&win.id) {
+                        self.pipeline.update_uniforms(
+                            &self.gpu.queue,
+                            win.x as f32,
+                            win.y as f32,
+                            win.width as f32,
+                            win.height as f32,
+                            vw as f32,
+                            vh as f32,
+                            win.opacity,
+                            win.corner_radius,
+                        );
+                        self.pipeline.render(&mut render_pass, bind_group);
+                    }
+                } else {
+                    // Non-blur window, render normally
+                    if let Some(bind_group) = self.window_bind_groups.get(&win.id) {
+                        self.pipeline.update_uniforms(
+                            &self.gpu.queue,
+                            win.x as f32,
+                            win.y as f32,
+                            win.width as f32,
+                            win.height as f32,
+                            vw as f32,
+                            vh as f32,
+                            win.opacity,
+                            win.corner_radius,
+                        );
+                        self.pipeline.render(&mut render_pass, bind_group);
+                    }
                 }
             }
         }
