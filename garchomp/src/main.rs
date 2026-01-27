@@ -1,6 +1,7 @@
 //! garchomp - X11 compositor for gar desktop environment.
 
 mod compositor;
+mod config;
 mod ipc;
 mod render;
 mod x11;
