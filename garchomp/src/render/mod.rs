@@ -4,6 +4,7 @@ mod blur;
 mod gpu;
 mod pipeline;
 mod renderer;
+mod shadow;
 mod texture;
 mod xlib;
 
@@ -11,5 +12,6 @@ pub use blur::{BlurPipeline, BlurTechnique};
 pub use gpu::{GpuContext, GpuError};
 pub use pipeline::{CompositePipeline, Uniforms, Vertex};
 pub use renderer::{Renderer, WindowRenderData, WindowRenderInfo};
+pub use shadow::{ShadowConfig, ShadowPipeline};
 pub use texture::{TextureManager, WindowTexture};
 pub use xlib::{XlibDisplay, XlibWindowHandle};
