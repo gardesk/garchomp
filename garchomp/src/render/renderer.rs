@@ -26,6 +26,8 @@ pub struct WindowRenderInfo {
     pub corner_radius: f32,
     pub shadow_enabled: bool,
     pub blur_behind: bool,
+    /// Whether this window is currently focused.
+    pub focused: bool,
 }
 
 /// Blur configuration.

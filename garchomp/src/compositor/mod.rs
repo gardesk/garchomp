@@ -1,7 +1,11 @@
 //! Core compositor state and event handling.
 
+mod animation;
+mod config;
 mod window;
 
+pub use animation::{Animation, Easing, WindowAnimations};
+pub use config::EffectsConfig;
 pub use window::{TrackedWindow, WindowType};
 
 use crate::render::{GpuError, Renderer, WindowRenderInfo};
@@ -42,6 +46,10 @@ pub struct Compositor {
     pub windows: HashMap<Window, TrackedWindow>,
     pub running: bool,
     needs_redraw: bool,
+    /// Currently focused window (from _NET_ACTIVE_WINDOW).
+    active_window: Option<Window>,
+    /// Effects configuration.
+    pub effects: EffectsConfig,
 }
 
 impl Compositor {
@@ -85,7 +93,12 @@ impl Compositor {
             windows: HashMap::new(),
             running: true,
             needs_redraw: true,
+            active_window: None,
+            effects: EffectsConfig::default(),
         };
+
+        // Get initial active window
+        compositor.active_window = compositor.conn.get_active_window();
 
         // Scan existing windows
         compositor.scan_windows()?;
@@ -146,6 +159,20 @@ impl Compositor {
             &ChangeWindowAttributesAux::new().event_mask(EventMask::PROPERTY_CHANGE),
         )?;
 
+        // Detect window type from _NET_WM_WINDOW_TYPE
+        let window_type = self.get_window_type_enum(window);
+
+        // Get initial opacity
+        let opacity = self.get_window_opacity(window);
+
+        // Create animation state, starting fade-in if enabled
+        let mut animations = WindowAnimations::new();
+        if self.effects.fade_enabled {
+            animations.start_fade_in(std::time::Duration::from_secs_f32(
+                self.effects.fade_in_duration,
+            ));
+        }
+
         let tracked = TrackedWindow {
             id: window,
             pixmap,
@@ -157,10 +184,11 @@ impl Compositor {
             border_width: geom.border_width,
             mapped: true,
             override_redirect: attrs.override_redirect,
-            window_type: WindowType::Normal,
-            opacity: 1.0,
+            window_type,
+            opacity,
             corner_radius: 12.0, // Default corner radius (TODO: make configurable)
             damaged: true,
+            animations,
         };
 
         tracing::debug!(
@@ -263,6 +291,13 @@ impl Compositor {
                 let _ = self.conn.conn.free_pixmap(old_pixmap);
             }
             tracked.pixmap = self.conn.name_window_pixmap(event.window).ok();
+
+            // Start fade-in animation
+            if self.effects.fade_enabled {
+                tracked.animations.start_fade_in(std::time::Duration::from_secs_f32(
+                    self.effects.fade_in_duration,
+                ));
+            }
         } else {
             self.track_window(event.window)?;
         }
@@ -275,7 +310,16 @@ impl Compositor {
         tracing::trace!("UnmapNotify: window {:#x}", event.window);
 
         if let Some(tracked) = self.windows.get_mut(&event.window) {
-            tracked.mapped = false;
+            // Start fade-out animation if enabled, otherwise hide immediately
+            if self.effects.fade_enabled {
+                tracked.animations.start_fade_out(std::time::Duration::from_secs_f32(
+                    self.effects.fade_out_duration,
+                ));
+                // Window stays "mapped" for rendering during fade-out
+                // It will be marked unmapped once animation completes
+            } else {
+                tracked.mapped = false;
+            }
             self.needs_redraw = true;
         }
     }
@@ -327,6 +371,26 @@ impl Compositor {
             }
         }
 
+        // Check for active window changes (on root window)
+        if event.window == self.conn.root() && event.atom == self.conn.atoms._NET_ACTIVE_WINDOW {
+            let new_active = self.conn.get_active_window();
+            if new_active != self.active_window {
+                tracing::debug!("Active window changed: {:?} -> {:?}", self.active_window, new_active);
+                self.active_window = new_active;
+                self.needs_redraw = true;
+            }
+        }
+
+        // Check for window type changes
+        if event.atom == self.conn.atoms._NET_WM_WINDOW_TYPE {
+            let window_type = self.get_window_type_enum(event.window);
+            if let Some(tracked) = self.windows.get_mut(&event.window) {
+                tracked.window_type = window_type;
+                tracked.damaged = true;
+                self.needs_redraw = true;
+            }
+        }
+
         Ok(())
     }
 
@@ -355,10 +419,60 @@ impl Compositor {
         }
     }
 
+    /// Convert _NET_WM_WINDOW_TYPE atom to WindowType enum.
+    fn get_window_type_enum(&self, window: Window) -> WindowType {
+        let atoms = &self.conn.atoms;
+
+        match self.conn.get_window_type(window) {
+            Some(type_atom) if type_atom == atoms._NET_WM_WINDOW_TYPE_DESKTOP => WindowType::Desktop,
+            Some(type_atom) if type_atom == atoms._NET_WM_WINDOW_TYPE_DOCK => WindowType::Dock,
+            Some(type_atom) if type_atom == atoms._NET_WM_WINDOW_TYPE_TOOLBAR => WindowType::Toolbar,
+            Some(type_atom) if type_atom == atoms._NET_WM_WINDOW_TYPE_MENU => WindowType::Menu,
+            Some(type_atom) if type_atom == atoms._NET_WM_WINDOW_TYPE_UTILITY => WindowType::Utility,
+            Some(type_atom) if type_atom == atoms._NET_WM_WINDOW_TYPE_SPLASH => WindowType::Splash,
+            Some(type_atom) if type_atom == atoms._NET_WM_WINDOW_TYPE_DIALOG => WindowType::Dialog,
+            Some(type_atom) if type_atom == atoms._NET_WM_WINDOW_TYPE_DROPDOWN_MENU => WindowType::DropdownMenu,
+            Some(type_atom) if type_atom == atoms._NET_WM_WINDOW_TYPE_POPUP_MENU => WindowType::PopupMenu,
+            Some(type_atom) if type_atom == atoms._NET_WM_WINDOW_TYPE_TOOLTIP => WindowType::Tooltip,
+            Some(type_atom) if type_atom == atoms._NET_WM_WINDOW_TYPE_NOTIFICATION => WindowType::Notification,
+            Some(type_atom) if type_atom == atoms._NET_WM_WINDOW_TYPE_COMBO => WindowType::Combo,
+            Some(type_atom) if type_atom == atoms._NET_WM_WINDOW_TYPE_DND => WindowType::Dnd,
+            _ => WindowType::Normal,
+        }
+    }
+
+    /// Check if a window is currently focused.
+    pub fn is_window_focused(&self, window: Window) -> bool {
+        self.active_window == Some(window)
+    }
+
     /// Render a frame if needed.
     pub fn render(&mut self) -> Result<()> {
         if !self.needs_redraw {
             return Ok(());
+        }
+
+        // Update animations and check for completions
+        let mut has_active_animations = false;
+        let mut windows_to_unmap = Vec::new();
+
+        for (id, w) in self.windows.iter_mut() {
+            w.animations.cleanup_completed();
+            if w.animations.has_active_animations() {
+                has_active_animations = true;
+            }
+            // Mark windows that finished fade-out as unmapped
+            if w.animations.fade_out_complete() {
+                windows_to_unmap.push(*id);
+            }
+        }
+
+        // Unmap windows that finished fading out
+        for id in windows_to_unmap {
+            if let Some(w) = self.windows.get_mut(&id) {
+                w.mapped = false;
+                w.animations.opacity = None;
+            }
         }
 
         // Get proper stacking order from WM (bottom to top)
@@ -369,6 +483,16 @@ impl Compositor {
         for window_id in stacking_order {
             if let Some(w) = self.windows.get(&window_id) {
                 if w.mapped && w.pixmap.is_some() {
+                    let focused = self.is_window_focused(w.id);
+                    let base_opacity = self.effects.effective_opacity(w.opacity, focused);
+                    // Apply animation opacity multiplier
+                    let opacity = base_opacity * w.animations.opacity_multiplier();
+                    let corner_radius = if w.should_have_corners() {
+                        self.effects.corner_radius
+                    } else {
+                        0.0
+                    };
+
                     windows.push(WindowRenderInfo {
                         id: w.id,
                         pixmap: w.pixmap.unwrap() as u64,
@@ -376,10 +500,11 @@ impl Compositor {
                         y: w.y,
                         width: w.width,
                         height: w.height,
-                        opacity: w.opacity,
-                        corner_radius: if w.should_have_corners() { w.corner_radius } else { 0.0 },
-                        shadow_enabled: w.should_have_shadow(),
-                        blur_behind: w.should_have_blur(),
+                        opacity,
+                        corner_radius,
+                        shadow_enabled: w.should_have_shadow() && self.effects.shadows_active(),
+                        blur_behind: w.should_have_blur() && self.effects.blur_active(),
+                        focused,
                     });
                 }
             }
@@ -389,6 +514,15 @@ impl Compositor {
         // (e.g., override-redirect windows not managed by WM)
         for w in self.windows.values() {
             if w.mapped && w.pixmap.is_some() && !windows.iter().any(|wi| wi.id == w.id) {
+                let focused = self.is_window_focused(w.id);
+                let base_opacity = self.effects.effective_opacity(w.opacity, focused);
+                let opacity = base_opacity * w.animations.opacity_multiplier();
+                let corner_radius = if w.should_have_corners() {
+                    self.effects.corner_radius
+                } else {
+                    0.0
+                };
+
                 windows.push(WindowRenderInfo {
                     id: w.id,
                     pixmap: w.pixmap.unwrap() as u64,
@@ -396,12 +530,18 @@ impl Compositor {
                     y: w.y,
                     width: w.width,
                     height: w.height,
-                    opacity: w.opacity,
-                    corner_radius: if w.should_have_corners() { w.corner_radius } else { 0.0 },
-                    shadow_enabled: w.should_have_shadow(),
-                    blur_behind: w.should_have_blur(),
+                    opacity,
+                    corner_radius,
+                    shadow_enabled: w.should_have_shadow() && self.effects.shadows_active(),
+                    blur_behind: w.should_have_blur() && self.effects.blur_active(),
+                    focused,
                 });
             }
+        }
+
+        // Keep redrawing while animations are active
+        if has_active_animations {
+            self.needs_redraw = true;
         }
 
         // Render the windows

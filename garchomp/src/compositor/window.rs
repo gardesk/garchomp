@@ -1,5 +1,6 @@
 //! Window tracking types.
 
+use super::animation::WindowAnimations;
 use x11rb::protocol::xproto::{Pixmap, Window};
 
 /// Type of window for compositor effects.
@@ -58,6 +59,8 @@ pub struct TrackedWindow {
     pub corner_radius: f32,
     /// Whether the window has been damaged since last render.
     pub damaged: bool,
+    /// Animation state for this window.
+    pub animations: WindowAnimations,
 }
 
 impl TrackedWindow {
