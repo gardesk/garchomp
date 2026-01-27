@@ -4,7 +4,7 @@ mod window;
 
 pub use window::{TrackedWindow, WindowType};
 
-use crate::render::{GpuError, Renderer};
+use crate::render::{GpuError, Renderer, WindowRenderInfo};
 use crate::x11::{CompositeExt, Connection};
 use std::collections::HashMap;
 use thiserror::Error;
@@ -187,6 +187,9 @@ impl Compositor {
                 let _ = self.conn.conn.free_pixmap(pixmap);
             }
 
+            // Remove texture from renderer
+            self.renderer.remove_window(window);
+
             tracing::debug!("Untracked window {:#x}", window);
         }
     }
@@ -357,7 +360,25 @@ impl Compositor {
             return Ok(());
         }
 
-        self.renderer.render()?;
+        // Collect window info for rendering
+        // Sort by stacking order (TODO: implement proper stacking)
+        let windows: Vec<WindowRenderInfo> = self
+            .windows
+            .values()
+            .filter(|w| w.mapped && w.pixmap.is_some())
+            .map(|w| WindowRenderInfo {
+                id: w.id,
+                pixmap: w.pixmap.unwrap() as u64,
+                x: w.x,
+                y: w.y,
+                width: w.width,
+                height: w.height,
+                opacity: w.opacity,
+            })
+            .collect();
+
+        // Render the windows
+        self.renderer.render_windows(&windows)?;
         self.needs_redraw = false;
 
         // Clear damage flags on windows

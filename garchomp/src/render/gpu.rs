@@ -186,4 +186,9 @@ impl GpuContext {
         self.device.poll(wgpu::Maintain::Wait);
         self.xlib_display.sync();
     }
+
+    /// Get the Xlib display pointer for sharing with other Xlib operations.
+    pub fn display_ptr(&self) -> *mut std::ffi::c_void {
+        self.xlib_display.display_ptr()
+    }
 }

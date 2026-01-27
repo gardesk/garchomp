@@ -1,6 +1,7 @@
 //! High-level renderer that manages the GPU context and rendering passes.
 
-use super::{CompositePipeline, GpuContext, GpuError};
+use super::{CompositePipeline, GpuContext, GpuError, TextureManager};
+use std::collections::HashMap;
 use wgpu::Color;
 
 /// Window render data - texture and bind group for a window.
@@ -12,13 +13,28 @@ pub struct WindowRenderData {
     pub height: u32,
 }
 
+/// Information about a window to render.
+#[derive(Clone, Debug)]
+pub struct WindowRenderInfo {
+    pub id: u32,
+    pub pixmap: u64,
+    pub x: i16,
+    pub y: i16,
+    pub width: u16,
+    pub height: u16,
+    pub opacity: f32,
+}
+
 /// The main renderer for the compositor.
 pub struct Renderer {
     pub gpu: GpuContext,
     pub pipeline: CompositePipeline,
+    pub texture_manager: TextureManager,
     clear_color: Color,
     // Test texture for validating the pipeline
     test_texture: Option<WindowRenderData>,
+    // Bind groups for windows (keyed by window ID)
+    window_bind_groups: HashMap<u32, wgpu::BindGroup>,
 }
 
 impl Renderer {
@@ -29,12 +45,16 @@ impl Renderer {
         // Create the composite pipeline
         let pipeline = CompositePipeline::new(&gpu.device, gpu.format());
 
+        // Create texture manager using the same display connection
+        let texture_manager = TextureManager::new(gpu.display_ptr())?;
+
         // Create a test texture (checkerboard pattern) to validate rendering
         let test_texture = Self::create_test_texture(&gpu, &pipeline);
 
         Ok(Self {
             gpu,
             pipeline,
+            texture_manager,
             clear_color: Color {
                 r: 0.1,
                 g: 0.1,
@@ -42,6 +62,7 @@ impl Renderer {
                 a: 1.0,
             },
             test_texture: Some(test_texture),
+            window_bind_groups: HashMap::new(),
         })
     }
 
@@ -132,7 +153,7 @@ impl Renderer {
     }
 
     /// Render a frame with the test texture to validate the pipeline.
-    pub fn render_test(&self) -> Result<(), GpuError> {
+    pub fn render_test(&mut self) -> Result<(), GpuError> {
         let frame = self.gpu.begin_frame()?;
         let view = frame.texture.create_view(&wgpu::TextureViewDescriptor::default());
 
@@ -181,10 +202,83 @@ impl Renderer {
         Ok(())
     }
 
+    /// Render a frame with the given windows.
+    pub fn render_windows(&mut self, windows: &[WindowRenderInfo]) -> Result<(), GpuError> {
+        // Update textures for all windows that have pixmaps
+        for win in windows {
+            if win.pixmap != 0 && win.width > 0 && win.height > 0 {
+                if let Ok(tex) = self.texture_manager.update_texture(
+                    &self.gpu.device,
+                    &self.gpu.queue,
+                    win.id,
+                    win.pixmap,
+                    win.width as u32,
+                    win.height as u32,
+                ) {
+                    // Create or update bind group for this window
+                    let bind_group = self.pipeline.create_bind_group(&self.gpu.device, &tex.view);
+                    self.window_bind_groups.insert(win.id, bind_group);
+                }
+            }
+        }
+
+        let frame = self.gpu.begin_frame()?;
+        let view = frame.texture.create_view(&wgpu::TextureViewDescriptor::default());
+
+        let mut encoder = self.gpu.create_encoder();
+
+        // Render pass
+        {
+            let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("composite_pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(self.clear_color),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+
+            let (vw, vh) = self.gpu.dimensions();
+
+            // Render each window in order (back to front)
+            for win in windows {
+                if let Some(bind_group) = self.window_bind_groups.get(&win.id) {
+                    self.pipeline.update_uniforms(
+                        &self.gpu.queue,
+                        win.x as f32,
+                        win.y as f32,
+                        win.width as f32,
+                        win.height as f32,
+                        vw as f32,
+                        vh as f32,
+                        win.opacity,
+                    );
+
+                    self.pipeline.render(&mut render_pass, bind_group);
+                }
+            }
+        }
+
+        self.gpu.end_frame(encoder, frame);
+        Ok(())
+    }
+
     /// Render a frame - currently renders the test pattern.
-    pub fn render(&self) -> Result<(), GpuError> {
+    pub fn render(&mut self) -> Result<(), GpuError> {
         // For now, just render the test pattern
         self.render_test()
+    }
+
+    /// Remove texture and bind group for a window.
+    pub fn remove_window(&mut self, window_id: u32) {
+        self.texture_manager.remove_texture(window_id);
+        self.window_bind_groups.remove(&window_id);
     }
 
     /// Poll the GPU device and sync display.
