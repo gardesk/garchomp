@@ -159,6 +159,7 @@ impl Compositor {
             override_redirect: attrs.override_redirect,
             window_type: WindowType::Normal,
             opacity: 1.0,
+            corner_radius: 12.0, // Default corner radius (TODO: make configurable)
             damaged: true,
         };
 
@@ -374,6 +375,7 @@ impl Compositor {
                 width: w.width,
                 height: w.height,
                 opacity: w.opacity,
+                corner_radius: if w.should_have_corners() { w.corner_radius } else { 0.0 },
             })
             .collect();
 

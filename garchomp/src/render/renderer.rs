@@ -23,6 +23,7 @@ pub struct WindowRenderInfo {
     pub width: u16,
     pub height: u16,
     pub opacity: f32,
+    pub corner_radius: f32,
 }
 
 /// The main renderer for the compositor.
@@ -192,6 +193,7 @@ impl Renderer {
                     vw as f32,
                     vh as f32,
                     1.0,
+                    20.0, // Test with rounded corners
                 );
 
                 self.pipeline.render(&mut render_pass, &test.bind_group);
@@ -258,6 +260,7 @@ impl Renderer {
                         vw as f32,
                         vh as f32,
                         win.opacity,
+                        win.corner_radius,
                     );
 
                     self.pipeline.render(&mut render_pass, bind_group);

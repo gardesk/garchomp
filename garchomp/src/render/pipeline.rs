@@ -34,8 +34,12 @@ pub struct Uniforms {
     pub viewport: [f32; 2],
     /// Opacity
     pub opacity: f32,
+    /// Corner radius in pixels
+    pub corner_radius: f32,
+    /// Window size in pixels
+    pub window_size: [f32; 2],
     /// Padding for alignment
-    pub _padding: f32,
+    pub _padding: [f32; 2],
 }
 
 impl Default for Uniforms {
@@ -44,7 +48,9 @@ impl Default for Uniforms {
             transform: [0.0, 0.0, 1.0, 1.0],
             viewport: [1920.0, 1080.0],
             opacity: 1.0,
-            _padding: 0.0,
+            corner_radius: 0.0,
+            window_size: [100.0, 100.0],
+            _padding: [0.0, 0.0],
         }
     }
 }
@@ -252,12 +258,15 @@ impl CompositePipeline {
         viewport_width: f32,
         viewport_height: f32,
         opacity: f32,
+        corner_radius: f32,
     ) {
         let uniforms = Uniforms {
             transform: [x, y, width, height],
             viewport: [viewport_width, viewport_height],
             opacity,
-            _padding: 0.0,
+            corner_radius,
+            window_size: [width, height],
+            _padding: [0.0, 0.0],
         };
         queue.write_buffer(&self.uniform_buffer, 0, bytemuck::cast_slice(&[uniforms]));
     }

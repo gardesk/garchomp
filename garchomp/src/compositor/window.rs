@@ -54,6 +54,8 @@ pub struct TrackedWindow {
     pub window_type: WindowType,
     /// Window opacity (0.0 - 1.0).
     pub opacity: f32,
+    /// Corner radius in pixels.
+    pub corner_radius: f32,
     /// Whether the window has been damaged since last render.
     pub damaged: bool,
 }
