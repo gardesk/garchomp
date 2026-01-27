@@ -1,5 +1,9 @@
 //! IPC server for garchomp control.
 
+mod gar;
+
+pub use gar::GarConnection;
+
 use garchomp_ipc::{Request, Response};
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::io::{AsRawFd, RawFd};
