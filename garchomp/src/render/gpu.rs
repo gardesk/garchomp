@@ -1,10 +1,13 @@
 //! GPU context and wgpu integration for compositor rendering.
 
-use super::xlib::{XlibDisplay, XlibWindowHandle};
+use super::xlib::{XlibDisplay, XlibError, XlibWindowHandle};
 use thiserror::Error;
 
 #[derive(Error, Debug)]
 pub enum GpuError {
+    #[error("Xlib error: {0}")]
+    Xlib(#[from] XlibError),
+
     #[error("failed to create wgpu surface: {0}")]
     CreateSurface(#[from] wgpu::CreateSurfaceError),
 
@@ -26,21 +29,19 @@ pub struct GpuContext {
     pub queue: wgpu::Queue,
     pub surface: wgpu::Surface<'static>,
     pub surface_config: wgpu::SurfaceConfiguration,
-    // Keep display alive for surface lifetime
-    _xlib_display: XlibDisplay,
+    // Keep Xlib display alive for surface lifetime
+    xlib_display: XlibDisplay,
 }
 
 impl GpuContext {
     /// Create a new GPU context for the given overlay window.
-    pub async fn new(
-        window: u32,
-        display_ptr: *mut std::ffi::c_void,
-        screen: i32,
-        width: u32,
-        height: u32,
-    ) -> Result<Self> {
-        // Create Xlib display wrapper (doesn't own the connection)
-        let xlib_display = unsafe { XlibDisplay::from_raw(display_ptr, screen) };
+    pub async fn new(window: u32, width: u32, height: u32) -> Result<Self> {
+        // Open separate Xlib connection for GPU
+        let xlib_display = XlibDisplay::open()?;
+        let display = xlib_display.display_ptr();
+        let screen = xlib_display.default_screen();
+
+        tracing::info!("Opened Xlib display for GPU, screen {}", screen);
 
         // Create wgpu instance - prefer Vulkan for better performance
         let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
@@ -49,7 +50,7 @@ impl GpuContext {
         });
 
         // Create window handle for surface creation
-        let handle = XlibWindowHandle::new(window, display_ptr, screen);
+        let handle = XlibWindowHandle::new(window, display, screen);
 
         // Create surface from X11 window
         let surface = instance.create_surface(handle)?;
@@ -97,7 +98,7 @@ impl GpuContext {
 
         tracing::info!("Surface format: {:?}", surface_format);
 
-        // Prefer opaque alpha mode for compositor
+        // Prefer opaque alpha mode for compositor overlay
         let alpha_mode = if surface_caps
             .alpha_modes
             .contains(&wgpu::CompositeAlphaMode::Opaque)
@@ -137,7 +138,7 @@ impl GpuContext {
             queue,
             surface,
             surface_config,
-            _xlib_display: xlib_display,
+            xlib_display,
         })
     }
 
@@ -180,8 +181,9 @@ impl GpuContext {
         frame.present();
     }
 
-    /// Poll the device (useful after frame for synchronization).
-    pub fn poll(&self) {
+    /// Poll the device and sync Xlib display.
+    pub fn poll_and_sync(&self) {
         self.device.poll(wgpu::Maintain::Wait);
+        self.xlib_display.sync();
     }
 }

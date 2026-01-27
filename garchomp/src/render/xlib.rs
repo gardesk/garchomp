@@ -6,44 +6,72 @@ use raw_window_handle::{
 };
 use std::ptr::NonNull;
 use thiserror::Error;
+use x11_dl::xlib::Xlib;
 
 #[derive(Error, Debug)]
 pub enum XlibError {
+    #[error("failed to load Xlib")]
+    LoadXlib,
     #[error("failed to open X11 display")]
     OpenDisplay,
 }
 
 /// Wrapper around Xlib display connection.
 ///
-/// Maintains the raw display pointer needed for wgpu surface creation.
+/// This opens a separate Xlib connection for GPU surface creation,
+/// independent of the x11rb connection used for compositor protocol.
 pub struct XlibDisplay {
-    display: *mut std::ffi::c_void,
-    screen: i32,
+    xlib: Xlib,
+    display: *mut x11_dl::xlib::Display,
 }
 
 impl XlibDisplay {
     /// Open connection to the default X11 display.
-    ///
-    /// # Safety
-    /// The display pointer must remain valid for the lifetime of this struct.
-    pub unsafe fn from_raw(display: *mut std::ffi::c_void, screen: i32) -> Self {
-        Self { display, screen }
+    pub fn open() -> Result<Self, XlibError> {
+        let xlib = Xlib::open().map_err(|_| XlibError::LoadXlib)?;
+
+        // SAFETY: XOpenDisplay with NULL opens the default display
+        let display = unsafe { (xlib.XOpenDisplay)(std::ptr::null()) };
+
+        if display.is_null() {
+            return Err(XlibError::OpenDisplay);
+        }
+
+        Ok(Self { xlib, display })
     }
 
     /// Get the raw display pointer.
     pub fn display_ptr(&self) -> *mut std::ffi::c_void {
-        self.display
+        self.display as *mut std::ffi::c_void
     }
 
-    /// Get the screen number.
-    pub fn screen(&self) -> i32 {
-        self.screen
+    /// Get the default screen number.
+    pub fn default_screen(&self) -> i32 {
+        // SAFETY: display is valid, XDefaultScreen returns screen number
+        unsafe { (self.xlib.XDefaultScreen)(self.display) }
+    }
+
+    /// Flush the display (send all pending requests).
+    pub fn flush(&self) {
+        // SAFETY: display is valid
+        unsafe { (self.xlib.XFlush)(self.display) };
+    }
+
+    /// Sync the display (flush and wait for all requests to complete).
+    pub fn sync(&self) {
+        // SAFETY: display is valid
+        unsafe { (self.xlib.XSync)(self.display, 0) };
     }
 }
 
-// XlibDisplay doesn't own the display - x11rb does
-// So we don't implement Drop to close it
+impl Drop for XlibDisplay {
+    fn drop(&mut self) {
+        // SAFETY: display is valid and we own it
+        unsafe { (self.xlib.XCloseDisplay)(self.display) };
+    }
+}
 
+// SAFETY: The Xlib display is thread-safe when properly synchronized
 unsafe impl Send for XlibDisplay {}
 unsafe impl Sync for XlibDisplay {}
 

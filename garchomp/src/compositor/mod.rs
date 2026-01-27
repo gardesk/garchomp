@@ -4,6 +4,7 @@ mod window;
 
 pub use window::{TrackedWindow, WindowType};
 
+use crate::render::{GpuError, Renderer};
 use crate::x11::{CompositeExt, Connection};
 use std::collections::HashMap;
 use thiserror::Error;
@@ -26,6 +27,9 @@ pub enum CompositorError {
 
     #[error("X11 reply error: {0}")]
     Reply(#[from] x11rb::errors::ReplyError),
+
+    #[error("GPU error: {0}")]
+    Gpu(#[from] GpuError),
 }
 
 pub type Result<T> = std::result::Result<T, CompositorError>;
@@ -34,13 +38,15 @@ pub type Result<T> = std::result::Result<T, CompositorError>;
 pub struct Compositor {
     pub conn: Connection,
     pub overlay: Window,
+    pub renderer: Renderer,
     pub windows: HashMap<Window, TrackedWindow>,
     pub running: bool,
+    needs_redraw: bool,
 }
 
 impl Compositor {
     /// Create a new compositor instance.
-    pub fn new() -> Result<Self> {
+    pub async fn new() -> Result<Self> {
         let conn = Connection::new()?;
 
         // Redirect all windows for compositing
@@ -49,6 +55,16 @@ impl Compositor {
         // Get the overlay window
         let overlay = conn.get_overlay_window()?;
         conn.configure_overlay(overlay)?;
+
+        // Get screen dimensions for GPU surface
+        let screen = conn.screen();
+        let width = screen.width_in_pixels as u32;
+        let height = screen.height_in_pixels as u32;
+
+        // Initialize GPU renderer
+        tracing::info!("Initializing GPU renderer for {}x{} surface", width, height);
+        let renderer = Renderer::new(overlay, width, height).await?;
+        tracing::info!("GPU renderer initialized");
 
         // Subscribe to events on root window
         let event_mask = EventMask::SUBSTRUCTURE_NOTIFY
@@ -65,8 +81,10 @@ impl Compositor {
         let mut compositor = Self {
             conn,
             overlay,
+            renderer,
             windows: HashMap::new(),
             running: true,
+            needs_redraw: true,
         };
 
         // Scan existing windows
@@ -206,6 +224,7 @@ impl Compositor {
                             let drawable = u32::from_ne_bytes([raw[4], raw[5], raw[6], raw[7]]);
                             if let Some(tracked) = self.windows.get_mut(&drawable) {
                                 tracked.damaged = true;
+                                self.needs_redraw = true;
                                 let _ = self.conn.conn.damage_subtract(tracked.damage, 0u32, 0u32);
                             }
                         }
@@ -244,6 +263,7 @@ impl Compositor {
             self.track_window(event.window)?;
         }
 
+        self.needs_redraw = true;
         Ok(())
     }
 
@@ -252,10 +272,19 @@ impl Compositor {
 
         if let Some(tracked) = self.windows.get_mut(&event.window) {
             tracked.mapped = false;
+            self.needs_redraw = true;
         }
     }
 
     fn handle_configure(&mut self, event: ConfigureNotifyEvent) -> Result<()> {
+        // Check if this is a root window configure (screen resize)
+        if event.window == self.conn.root() {
+            tracing::info!("Screen resized to {}x{}", event.width, event.height);
+            self.renderer.resize(event.width as u32, event.height as u32);
+            self.needs_redraw = true;
+            return Ok(());
+        }
+
         if let Some(tracked) = self.windows.get_mut(&event.window) {
             let size_changed =
                 tracked.width != event.width || tracked.height != event.height;
@@ -276,6 +305,8 @@ impl Compositor {
                     tracked.pixmap = self.conn.name_window_pixmap(event.window).ok();
                 }
             }
+
+            self.needs_redraw = true;
         }
 
         Ok(())
@@ -288,6 +319,7 @@ impl Compositor {
             if let Some(tracked) = self.windows.get_mut(&event.window) {
                 tracked.opacity = opacity;
                 tracked.damaged = true;
+                self.needs_redraw = true;
             }
         }
 
@@ -317,6 +349,39 @@ impl Compositor {
             }
             Err(_) => 1.0,
         }
+    }
+
+    /// Render a frame if needed.
+    pub fn render(&mut self) -> Result<()> {
+        if !self.needs_redraw {
+            return Ok(());
+        }
+
+        self.renderer.render()?;
+        self.needs_redraw = false;
+
+        // Clear damage flags on windows
+        for window in self.windows.values_mut() {
+            window.damaged = false;
+        }
+
+        Ok(())
+    }
+
+    /// Mark the compositor as needing a redraw.
+    pub fn request_redraw(&mut self) {
+        self.needs_redraw = true;
+    }
+
+    /// Check if a redraw is needed.
+    pub fn needs_redraw(&self) -> bool {
+        self.needs_redraw
+    }
+
+    /// Resize the renderer surface.
+    pub fn resize(&mut self, width: u32, height: u32) {
+        self.renderer.resize(width, height);
+        self.needs_redraw = true;
     }
 
     /// Shutdown the compositor cleanly.

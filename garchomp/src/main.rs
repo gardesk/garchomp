@@ -33,7 +33,8 @@ struct Cli {
     no_hdr: bool,
 }
 
-fn main() -> Result<()> {
+#[tokio::main]
+async fn main() -> Result<()> {
     let cli = Cli::parse();
 
     // Initialize logging
@@ -45,9 +46,10 @@ fn main() -> Result<()> {
     let running = Arc::new(AtomicBool::new(true));
     setup_signal_handlers(running.clone())?;
 
-    // Create compositor
-    let mut compositor =
-        compositor::Compositor::new().context("Failed to initialize compositor")?;
+    // Create compositor (async for GPU initialization)
+    let mut compositor = compositor::Compositor::new()
+        .await
+        .context("Failed to initialize compositor")?;
 
     // Create IPC server
     let mut ipc_server = ipc::IpcServer::new().context("Failed to start IPC server")?;
@@ -65,9 +67,16 @@ fn main() -> Result<()> {
         }
 
         // Handle X11 events (non-blocking poll)
-        if let Ok(Some(event)) = compositor.conn.conn.poll_for_event() {
+        while let Ok(Some(event)) = compositor.conn.conn.poll_for_event() {
             if let Err(e) = compositor.handle_event(event) {
                 tracing::error!("Error handling event: {}", e);
+            }
+        }
+
+        // Render if needed
+        if compositor.needs_redraw() {
+            if let Err(e) = compositor.render() {
+                tracing::error!("Render error: {}", e);
             }
         }
 

@@ -17,6 +17,7 @@ x11rb = { version = "0.13", features = ["allow-unsafe-code", "randr", "composite
 wgpu = "24"
 raw-window-handle = "0.6"
 bytemuck = { version = "1", features = ["derive"] }
+x11-dl = "2.21"
 
 # Async
 tokio = { version = "1", features = ["full", "signal"] }
