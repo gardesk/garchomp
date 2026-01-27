@@ -27,6 +27,8 @@ enum Commands {
     Windows,
     /// Ping the compositor.
     Ping,
+    /// Get compositor status.
+    Status,
 }
 
 fn main() -> Result<()> {
@@ -45,6 +47,7 @@ fn main() -> Result<()> {
         Commands::Blur { strength } => Request::SetBlurStrength { strength },
         Commands::Windows => Request::ListWindows,
         Commands::Ping => Request::Ping,
+        Commands::Status => Request::Status,
     };
 
     let response = send_request(&request)?;
@@ -56,13 +59,30 @@ fn main() -> Result<()> {
             eprintln!("Error: {}", message);
             std::process::exit(1);
         }
+        Response::Version { version, name } => {
+            println!("{} v{}", name, version);
+        }
+        Response::Status(status) => {
+            println!("Compositor Status:");
+            println!("  Version: {}", status.version);
+            println!("  Windows: {}", status.window_count);
+            println!("  Workspace: {}", status.current_workspace);
+            println!("  Connected to gar: {}", status.connected_to_gar);
+            println!("  Effects:");
+            println!("    Blur: {} (strength: {})",
+                status.effects_enabled.blur, status.effects_enabled.blur_strength);
+            println!("    Shadows: {}", status.effects_enabled.shadows);
+            println!("    Animations: {}", status.effects_enabled.animations);
+        }
         Response::WindowInfo(info) => {
             println!("{}", serde_json::to_string_pretty(&info)?);
         }
         Response::WindowList { windows } => {
             for win in windows {
+                let focus_marker = if win.focused { "*" } else { " " };
                 println!(
-                    "{:#010x}  {}x{}+{}+{}  {}",
+                    "{}{:#010x}  {}x{}+{}+{}  {}",
+                    focus_marker,
                     win.id,
                     win.width,
                     win.height,
