@@ -21,4 +21,6 @@ tracing-subscriber = { workspace = true }
 thiserror = { workspace = true }
 anyhow = { workspace = true }
 nix = { workspace = true }
+mlua = { workspace = true }
+notify = { workspace = true }
 ctrlc = "3"

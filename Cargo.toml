@@ -40,5 +40,9 @@ anyhow = "1"
 # Unix
 nix = { version = "0.30", features = ["poll"] }
 
+# Config
+mlua = { version = "0.10", features = ["lua54", "vendored"] }
+notify = "7"
+
 # Internal
 garchomp-ipc = { path = "garchomp-ipc" }
