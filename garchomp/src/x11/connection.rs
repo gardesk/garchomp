@@ -157,4 +157,37 @@ impl Connection {
             Ok(tree.children)
         }
     }
+
+    /// Get the window type atom for a window.
+    /// Returns the first type atom, or None if not set.
+    pub fn get_window_type(&self, window: Window) -> Option<u32> {
+        use x11rb::protocol::xproto::AtomEnum;
+
+        let reply = self.conn.get_property(
+            false,
+            window,
+            self.atoms._NET_WM_WINDOW_TYPE,
+            AtomEnum::ATOM,
+            0,
+            32,
+        ).ok()?.reply().ok()?;
+
+        reply.value32().and_then(|mut v| v.next())
+    }
+
+    /// Get the currently active (focused) window.
+    pub fn get_active_window(&self) -> Option<Window> {
+        use x11rb::protocol::xproto::AtomEnum;
+
+        let reply = self.conn.get_property(
+            false,
+            self.root(),
+            self.atoms._NET_ACTIVE_WINDOW,
+            AtomEnum::WINDOW,
+            0,
+            1,
+        ).ok()?.reply().ok()?;
+
+        reply.value32().and_then(|mut v| v.next())
+    }
 }
