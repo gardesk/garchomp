@@ -13,6 +13,11 @@ repository = "https://github.com/gardesk/garchomp"
 # X11
 x11rb = { version = "0.13", features = ["allow-unsafe-code", "randr", "composite", "damage", "xfixes", "shape", "render"] }
 
+# GPU
+wgpu = "24"
+raw-window-handle = "0.6"
+bytemuck = { version = "1", features = ["derive"] }
+
 # Async
 tokio = { version = "1", features = ["full", "signal"] }
 

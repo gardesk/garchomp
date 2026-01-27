@@ -2,6 +2,7 @@
 
 mod compositor;
 mod ipc;
+mod render;
 mod x11;
 
 use anyhow::{Context, Result};
