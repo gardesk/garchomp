@@ -37,5 +37,8 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 thiserror = "2"
 anyhow = "1"
 
+# Unix
+nix = { version = "0.30", features = ["poll"] }
+
 # Internal
 garchomp-ipc = { path = "garchomp-ipc" }

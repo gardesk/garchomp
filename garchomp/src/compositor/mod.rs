@@ -361,23 +361,48 @@ impl Compositor {
             return Ok(());
         }
 
-        // Collect window info for rendering
-        // Sort by stacking order (TODO: implement proper stacking)
-        let windows: Vec<WindowRenderInfo> = self
-            .windows
-            .values()
-            .filter(|w| w.mapped && w.pixmap.is_some())
-            .map(|w| WindowRenderInfo {
-                id: w.id,
-                pixmap: w.pixmap.unwrap() as u64,
-                x: w.x,
-                y: w.y,
-                width: w.width,
-                height: w.height,
-                opacity: w.opacity,
-                corner_radius: if w.should_have_corners() { w.corner_radius } else { 0.0 },
-            })
-            .collect();
+        // Get proper stacking order from WM (bottom to top)
+        let stacking_order = self.conn.get_stacking_order().unwrap_or_default();
+
+        // Collect window info for rendering in stacking order
+        let mut windows: Vec<WindowRenderInfo> = Vec::new();
+        for window_id in stacking_order {
+            if let Some(w) = self.windows.get(&window_id) {
+                if w.mapped && w.pixmap.is_some() {
+                    windows.push(WindowRenderInfo {
+                        id: w.id,
+                        pixmap: w.pixmap.unwrap() as u64,
+                        x: w.x,
+                        y: w.y,
+                        width: w.width,
+                        height: w.height,
+                        opacity: w.opacity,
+                        corner_radius: if w.should_have_corners() { w.corner_radius } else { 0.0 },
+                        shadow_enabled: w.should_have_shadow(),
+                        blur_behind: w.should_have_blur(),
+                    });
+                }
+            }
+        }
+
+        // Also include any windows we're tracking that aren't in stacking list
+        // (e.g., override-redirect windows not managed by WM)
+        for w in self.windows.values() {
+            if w.mapped && w.pixmap.is_some() && !windows.iter().any(|wi| wi.id == w.id) {
+                windows.push(WindowRenderInfo {
+                    id: w.id,
+                    pixmap: w.pixmap.unwrap() as u64,
+                    x: w.x,
+                    y: w.y,
+                    width: w.width,
+                    height: w.height,
+                    opacity: w.opacity,
+                    corner_radius: if w.should_have_corners() { w.corner_radius } else { 0.0 },
+                    shadow_enabled: w.should_have_shadow(),
+                    blur_behind: w.should_have_blur(),
+                });
+            }
+        }
 
         // Render the windows
         self.renderer.render_windows(&windows)?;

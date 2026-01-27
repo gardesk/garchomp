@@ -1,12 +1,13 @@
 //! X11 connection wrapper with extension support.
 
 use super::Atoms;
+use std::os::unix::io::{AsRawFd, RawFd};
 use thiserror::Error;
 use x11rb::connection::{Connection as X11Connection, RequestConnection};
 use x11rb::protocol::composite::ConnectionExt as CompositeConnectionExt;
 use x11rb::protocol::damage::ConnectionExt as DamageConnectionExt;
 use x11rb::protocol::xfixes::ConnectionExt as XfixesConnectionExt;
-use x11rb::protocol::xproto::{Screen, Window};
+use x11rb::protocol::xproto::{ConnectionExt as XprotoConnectionExt, Screen, Window};
 use x11rb::rust_connection::RustConnection;
 
 #[derive(Error, Debug)]
@@ -127,5 +128,33 @@ impl Connection {
     /// Generate a new X11 ID.
     pub fn generate_id(&self) -> Result<u32> {
         Ok(self.conn.generate_id()?)
+    }
+
+    /// Get the raw file descriptor for polling.
+    pub fn as_raw_fd(&self) -> RawFd {
+        self.conn.stream().as_raw_fd()
+    }
+
+    /// Get the window stacking order from the WM.
+    /// Returns windows from bottom to top (render order).
+    pub fn get_stacking_order(&self) -> Result<Vec<u32>> {
+        use x11rb::protocol::xproto::AtomEnum;
+
+        let reply = self.conn.get_property(
+            false,
+            self.root(),
+            self.atoms._NET_CLIENT_LIST_STACKING,
+            AtomEnum::WINDOW,
+            0,
+            u32::MAX,
+        )?.reply()?;
+
+        if let Some(windows) = reply.value32() {
+            Ok(windows.collect())
+        } else {
+            // Fallback: query tree for basic stacking
+            let tree = self.conn.query_tree(self.root())?.reply()?;
+            Ok(tree.children)
+        }
     }
 }

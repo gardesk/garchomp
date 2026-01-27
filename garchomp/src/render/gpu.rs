@@ -19,6 +19,9 @@ pub enum GpuError {
 
     #[error("surface error: {0}")]
     Surface(#[from] wgpu::SurfaceError),
+
+    #[error("failed to get image from pixmap {pixmap:#x} ({width}x{height})")]
+    GetImageFailed { pixmap: u64, width: u32, height: u32 },
 }
 
 pub type Result<T> = std::result::Result<T, GpuError>;

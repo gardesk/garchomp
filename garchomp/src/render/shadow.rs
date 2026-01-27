@@ -33,30 +33,37 @@ impl Default for ShadowConfig {
 }
 
 /// Uniform data for shadow rendering.
+/// Note: Layout must match WGSL std140 alignment rules.
+/// vec3 requires 16-byte alignment, vec2 requires 8-byte alignment.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Pod, Zeroable)]
 pub struct ShadowUniforms {
     /// Transform: position (xy) and scale (zw)
-    pub transform: [f32; 4],
+    pub transform: [f32; 4],       // offset 0, size 16
     /// Viewport size
-    pub viewport: [f32; 2],
-    /// Shadow color
-    pub color: [f32; 3],
+    pub viewport: [f32; 2],        // offset 16, size 8
+    /// Padding for vec3 alignment (vec3 needs 16-byte alignment)
+    pub _pad0: [f32; 2],           // offset 24, size 8
+    /// Shadow color (stored as vec3, but vec3 has size 16 in std140)
+    pub color: [f32; 3],           // offset 32, size 12
     /// Shadow opacity
-    pub opacity: f32,
+    pub opacity: f32,              // offset 44, size 4
     /// Window size
-    pub window_size: [f32; 2],
+    pub window_size: [f32; 2],     // offset 48, size 8
     /// Shadow spread
-    pub spread: f32,
+    pub spread: f32,               // offset 56, size 4
     /// Shadow blur radius
-    pub blur_radius: f32,
+    pub blur_radius: f32,          // offset 60, size 4
     /// Corner radius
-    pub corner_radius: f32,
+    pub corner_radius: f32,        // offset 64, size 4
+    /// Padding for vec2 alignment
+    pub _pad1: f32,                // offset 68, size 4
     /// Shadow offset
-    pub offset: [f32; 2],
-    /// Padding
-    pub _padding: f32,
+    pub offset: [f32; 2],          // offset 72, size 8
+    /// Padding to reach 96 bytes (struct rounds to largest alignment = 16)
+    pub _pad2: [f32; 4],           // offset 80, size 16
 }
+// Total size: 96 bytes
 
 /// Shadow rendering pipeline.
 pub struct ShadowPipeline {
@@ -140,14 +147,16 @@ impl ShadowPipeline {
             contents: bytemuck::cast_slice(&[ShadowUniforms {
                 transform: [0.0, 0.0, 100.0, 100.0],
                 viewport: [1920.0, 1080.0],
+                _pad0: [0.0; 2],
                 color: [0.0, 0.0, 0.0],
                 opacity: 0.5,
                 window_size: [100.0, 100.0],
                 spread: 15.0,
                 blur_radius: 12.0,
                 corner_radius: 0.0,
+                _pad1: 0.0,
                 offset: [0.0, 5.0],
-                _padding: 0.0,
+                _pad2: [0.0; 4],
             }]),
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
@@ -229,17 +238,19 @@ impl ShadowPipeline {
         let uniforms = ShadowUniforms {
             transform: [shadow_x, shadow_y, shadow_width, shadow_height],
             viewport: [viewport_width, viewport_height],
+            _pad0: [0.0; 2],
             color: config.color,
             opacity: config.opacity,
             window_size: [window_width, window_height],
             spread: config.spread,
             blur_radius: config.blur_radius,
             corner_radius,
+            _pad1: 0.0,
             offset: [
                 config.offset[0] / shadow_width,
                 config.offset[1] / shadow_height,
             ],
-            _padding: 0.0,
+            _pad2: [0.0; 4],
         };
 
         queue.write_buffer(&self.uniform_buffer, 0, bytemuck::cast_slice(&[uniforms]));

@@ -132,7 +132,7 @@ impl TextureManager {
         };
 
         if image.is_null() {
-            return Err(GpuError::Xlib(super::xlib::XlibError::OpenDisplay));
+            return Err(GpuError::GetImageFailed { pixmap, width, height });
         }
 
         // Convert to BGRA8 pixel data

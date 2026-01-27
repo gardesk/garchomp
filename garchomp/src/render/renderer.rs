@@ -1,6 +1,6 @@
 //! High-level renderer that manages the GPU context and rendering passes.
 
-use super::{CompositePipeline, GpuContext, GpuError, TextureManager};
+use super::{BlurPipeline, BlurTechnique, CompositePipeline, GpuContext, GpuError, ShadowConfig, ShadowPipeline, TextureManager};
 use std::collections::HashMap;
 use wgpu::Color;
 
@@ -24,12 +24,38 @@ pub struct WindowRenderInfo {
     pub height: u16,
     pub opacity: f32,
     pub corner_radius: f32,
+    pub shadow_enabled: bool,
+    pub blur_behind: bool,
+}
+
+/// Blur configuration.
+#[derive(Debug, Clone, Copy)]
+pub struct BlurConfig {
+    pub enabled: bool,
+    pub technique: BlurTechnique,
+    pub iterations: u32,
+    pub strength: f32,
+}
+
+impl Default for BlurConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            technique: BlurTechnique::DualKawase,
+            iterations: 4,
+            strength: 1.0,
+        }
+    }
 }
 
 /// The main renderer for the compositor.
 pub struct Renderer {
     pub gpu: GpuContext,
     pub pipeline: CompositePipeline,
+    pub shadow_pipeline: ShadowPipeline,
+    pub blur_pipeline: BlurPipeline,
+    pub shadow_config: ShadowConfig,
+    pub blur_config: BlurConfig,
     pub texture_manager: TextureManager,
     clear_color: Color,
     // Test texture for validating the pipeline
@@ -46,6 +72,12 @@ impl Renderer {
         // Create the composite pipeline
         let pipeline = CompositePipeline::new(&gpu.device, gpu.format());
 
+        // Create shadow pipeline
+        let shadow_pipeline = ShadowPipeline::new(&gpu.device, gpu.format());
+
+        // Create blur pipeline
+        let blur_pipeline = BlurPipeline::new(&gpu.device, gpu.format());
+
         // Create texture manager using the same display connection
         let texture_manager = TextureManager::new(gpu.display_ptr())?;
 
@@ -55,6 +87,10 @@ impl Renderer {
         Ok(Self {
             gpu,
             pipeline,
+            shadow_pipeline,
+            blur_pipeline,
+            shadow_config: ShadowConfig::default(),
+            blur_config: BlurConfig::default(),
             texture_manager,
             clear_color: Color {
                 r: 0.1,
@@ -248,7 +284,25 @@ impl Renderer {
 
             let (vw, vh) = self.gpu.dimensions();
 
-            // Render each window in order (back to front)
+            // First pass: render shadows for all windows (back to front)
+            for win in windows {
+                if win.shadow_enabled {
+                    self.shadow_pipeline.update_uniforms(
+                        &self.gpu.queue,
+                        win.x as f32,
+                        win.y as f32,
+                        win.width as f32,
+                        win.height as f32,
+                        vw as f32,
+                        vh as f32,
+                        win.corner_radius,
+                        &self.shadow_config,
+                    );
+                    self.shadow_pipeline.render(&mut render_pass);
+                }
+            }
+
+            // Second pass: render windows (back to front)
             for win in windows {
                 if let Some(bind_group) = self.window_bind_groups.get(&win.id) {
                     self.pipeline.update_uniforms(

@@ -8,6 +8,8 @@ mod x11;
 use anyhow::{Context, Result};
 use clap::Parser;
 use garchomp_ipc::{Request, Response, WindowInfo};
+use nix::poll::{poll, PollFd, PollFlags, PollTimeout};
+use std::os::unix::io::BorrowedFd;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tracing_subscriber::EnvFilter;
@@ -59,18 +61,37 @@ async fn main() -> Result<()> {
         compositor.windows.len()
     );
 
-    // Main event loop
-    while running.load(Ordering::Relaxed) && compositor.running {
-        // Handle IPC requests (non-blocking)
-        while let Some(request) = ipc_server.poll() {
-            handle_ipc_request(&mut compositor, request);
-        }
+    // Get file descriptors for polling
+    let x11_fd = compositor.conn.as_raw_fd();
+    let ipc_fd = ipc_server.as_raw_fd();
 
-        // Handle X11 events (non-blocking poll)
+    // Main event loop with proper polling
+    while running.load(Ordering::Relaxed) && compositor.running {
+        // Set up poll fds
+        // SAFETY: We know these fds are valid for the duration of this loop iteration
+        let mut poll_fds = [
+            PollFd::new(unsafe { BorrowedFd::borrow_raw(x11_fd) }, PollFlags::POLLIN),
+            PollFd::new(unsafe { BorrowedFd::borrow_raw(ipc_fd) }, PollFlags::POLLIN),
+        ];
+
+        // Wait for events (16ms timeout for ~60fps rendering, or immediate if redraw needed)
+        let timeout = if compositor.needs_redraw() {
+            PollTimeout::ZERO
+        } else {
+            PollTimeout::try_from(16).unwrap_or(PollTimeout::ZERO)
+        };
+        let _ = poll(&mut poll_fds, timeout);
+
+        // Handle X11 events
         while let Ok(Some(event)) = compositor.conn.conn.poll_for_event() {
             if let Err(e) = compositor.handle_event(event) {
                 tracing::error!("Error handling event: {}", e);
             }
+        }
+
+        // Handle IPC requests
+        while let Some(request) = ipc_server.poll() {
+            handle_ipc_request(&mut compositor, request);
         }
 
         // Render if needed
@@ -79,10 +100,6 @@ async fn main() -> Result<()> {
                 tracing::error!("Render error: {}", e);
             }
         }
-
-        // Small sleep to prevent busy-waiting
-        // TODO: Use proper event-driven approach with poll/select
-        std::thread::sleep(std::time::Duration::from_millis(1));
     }
 
     tracing::info!("Shutting down");

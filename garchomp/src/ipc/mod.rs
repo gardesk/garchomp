@@ -2,6 +2,7 @@
 
 use garchomp_ipc::{Request, Response};
 use std::io::{BufRead, BufReader, Write};
+use std::os::unix::io::{AsRawFd, RawFd};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
 use thiserror::Error;
@@ -47,6 +48,11 @@ impl IpcServer {
         let runtime_dir =
             std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| "/tmp".to_string());
         PathBuf::from(runtime_dir).join("garchomp.sock")
+    }
+
+    /// Get the raw file descriptor for polling.
+    pub fn as_raw_fd(&self) -> RawFd {
+        self.listener.as_raw_fd()
     }
 
     /// Poll for incoming connections (non-blocking).
