@@ -38,6 +38,9 @@ impl TextureManager {
     }
 
     /// Update a window's texture from its pixmap.
+    ///
+    /// `depth` should be the window's depth (e.g., 24 or 32).
+    /// For 32-bit depth, alpha channel is preserved; for 24-bit, alpha is set to opaque.
     pub fn update_texture(
         &mut self,
         device: &wgpu::Device,
@@ -47,8 +50,11 @@ impl TextureManager {
         width: u32,
         height: u32,
     ) -> Result<&WindowTexture, GpuError> {
+        // Query pixmap depth via XGetGeometry
+        let depth = self.get_pixmap_depth(pixmap);
+
         // Get pixel data from pixmap
-        let pixels = self.get_pixmap_data(pixmap, width, height)?;
+        let pixels = self.get_pixmap_data(pixmap, width, height, depth)?;
 
         // Check if texture exists and has the right size
         let needs_recreate = match self.textures.get(&window_id) {
@@ -111,8 +117,40 @@ impl TextureManager {
         Ok(self.textures.get(&window_id).unwrap())
     }
 
+    /// Get the depth of a pixmap via XGetGeometry.
+    fn get_pixmap_depth(&self, pixmap: u64) -> u8 {
+        let mut root: u64 = 0;
+        let mut x: i32 = 0;
+        let mut y: i32 = 0;
+        let mut width: u32 = 0;
+        let mut height: u32 = 0;
+        let mut border_width: u32 = 0;
+        let mut depth: u32 = 0;
+
+        let status = unsafe {
+            (self.xlib.XGetGeometry)(
+                self.display,
+                pixmap,
+                &mut root,
+                &mut x,
+                &mut y,
+                &mut width,
+                &mut height,
+                &mut border_width,
+                &mut depth,
+            )
+        };
+
+        if status == 0 {
+            // Failed - assume 24-bit (no alpha)
+            24
+        } else {
+            depth as u8
+        }
+    }
+
     /// Get pixel data from an X11 pixmap.
-    fn get_pixmap_data(&self, pixmap: u64, width: u32, height: u32) -> Result<Vec<u8>, GpuError> {
+    fn get_pixmap_data(&self, pixmap: u64, width: u32, height: u32, depth: u8) -> Result<Vec<u8>, GpuError> {
         // Get the default visual for depth/color info
         let screen = unsafe { (self.xlib.XDefaultScreen)(self.display) };
         let visual = unsafe { (self.xlib.XDefaultVisual)(self.display, screen) };
@@ -135,8 +173,8 @@ impl TextureManager {
             return Err(GpuError::GetImageFailed { pixmap, width, height });
         }
 
-        // Convert to BGRA8 pixel data
-        let pixels = unsafe { self.convert_ximage_to_bgra(image, width, height, visual) };
+        // Convert to BGRA8 pixel data, using depth to determine alpha handling
+        let pixels = unsafe { self.convert_ximage_to_bgra(image, width, height, visual, depth) };
 
         // Free the XImage
         unsafe {
@@ -147,12 +185,16 @@ impl TextureManager {
     }
 
     /// Convert XImage data to BGRA8 format.
+    ///
+    /// `depth` is the pixmap depth (from XGetGeometry), which tells us whether
+    /// to preserve alpha (32-bit) or treat alpha as opaque (24-bit).
     unsafe fn convert_ximage_to_bgra(
         &self,
         image: *mut XImage,
         width: u32,
         height: u32,
         _visual: *mut Visual,
+        depth: u8,
     ) -> Vec<u8> {
         // SAFETY: image pointer is valid, checked by caller
         let img = unsafe { &*image };
@@ -162,6 +204,9 @@ impl TextureManager {
         let bits_per_pixel = img.bits_per_pixel;
         let data = img.data as *const u8;
 
+        // True ARGB windows have depth 32; depth 24 windows have no real alpha
+        let has_real_alpha = depth >= 32;
+
         for y in 0..height {
             for x in 0..width {
                 let src_offset = (y as usize) * bytes_per_line + (x as usize) * (bits_per_pixel / 8) as usize;
@@ -169,7 +214,7 @@ impl TextureManager {
 
                 match bits_per_pixel {
                     32 => {
-                        // Assume BGRA or BGRX format (common for 32-bit depth)
+                        // BGRA or BGRX format
                         // SAFETY: src_offset is within image bounds
                         let b = unsafe { *data.add(src_offset) };
                         let g = unsafe { *data.add(src_offset + 1) };
@@ -179,10 +224,14 @@ impl TextureManager {
                         pixels[dst_offset] = b;
                         pixels[dst_offset + 1] = g;
                         pixels[dst_offset + 2] = r;
-                        pixels[dst_offset + 3] = if a == 0 { 255 } else { a };
+
+                        // For true 32-bit depth windows, preserve alpha exactly.
+                        // For 24-bit windows displayed as 32bpp, alpha byte is garbage/0,
+                        // so treat as opaque.
+                        pixels[dst_offset + 3] = if has_real_alpha { a } else { 255 };
                     }
                     24 => {
-                        // BGR format
+                        // BGR format - always opaque
                         // SAFETY: src_offset is within image bounds
                         let b = unsafe { *data.add(src_offset) };
                         let g = unsafe { *data.add(src_offset + 1) };
@@ -194,7 +243,7 @@ impl TextureManager {
                         pixels[dst_offset + 3] = 255;
                     }
                     16 => {
-                        // Assume RGB565
+                        // Assume RGB565 - always opaque
                         // SAFETY: src_offset is within image bounds
                         let lo = unsafe { *data.add(src_offset) as u16 };
                         let hi = unsafe { *data.add(src_offset + 1) as u16 };
