@@ -10,14 +10,15 @@ pub use config::EffectsConfig;
 pub use window::{TrackedWindow, WindowType};
 pub use workspace::{TransitionDirection, WorkspaceState, WorkspaceTransition};
 
+use crate::config::LuaConfig;
 use crate::ipc::GarConnection;
-use crate::render::{GpuError, Renderer, WindowRenderInfo};
+use crate::render::{GpuError, HdrConfig, Renderer, WindowRenderInfo};
 use crate::x11::{CompositeExt, Connection};
 use garchomp_ipc::GarEvent;
 use std::collections::HashMap;
 use thiserror::Error;
 use x11rb::connection::Connection as _;
-use x11rb::protocol::damage::{ConnectionExt as DamageConnectionExt, ReportLevel};
+use x11rb::protocol::damage::{ConnectionExt as DamageConnectionExt, NotifyEvent as DamageNotifyEvent, ReportLevel};
 use x11rb::protocol::xproto::{
     AtomEnum, ChangeWindowAttributesAux, ConfigureNotifyEvent, ConnectionExt, CreateNotifyEvent,
     DestroyNotifyEvent, EventMask, MapNotifyEvent, PropertyNotifyEvent,
@@ -58,6 +59,8 @@ pub struct Compositor {
     pub workspaces: WorkspaceState,
     /// Connection to gar window manager.
     pub gar: GarConnection,
+    /// Lua configuration (for reloading and animation callbacks).
+    lua_config: Option<LuaConfig>,
 }
 
 impl Compositor {
@@ -98,6 +101,30 @@ impl Compositor {
         let mut gar = GarConnection::new();
         gar.connect();
 
+        // Load Lua configuration
+        let (lua_config, effects) = match LuaConfig::new() {
+            Ok(mut lua) => {
+                if let Err(e) = lua.load() {
+                    tracing::warn!("Failed to load Lua config: {}", e);
+                    (Some(lua), EffectsConfig::default())
+                } else {
+                    let effects = EffectsConfig::from_lua_config(&lua);
+                    tracing::info!(
+                        "Loaded config: blur={}, shadows={}, corners={:.1}px, fade={}",
+                        effects.blur_enabled,
+                        effects.shadow_enabled,
+                        effects.corner_radius,
+                        effects.fade_enabled
+                    );
+                    (Some(lua), effects)
+                }
+            }
+            Err(e) => {
+                tracing::warn!("Failed to create Lua config: {}", e);
+                (None, EffectsConfig::default())
+            }
+        };
+
         let mut compositor = Self {
             conn,
             overlay,
@@ -106,13 +133,23 @@ impl Compositor {
             running: true,
             needs_redraw: true,
             active_window: None,
-            effects: EffectsConfig::default(),
+            effects,
             workspaces: WorkspaceState::new(),
             gar,
+            lua_config,
         };
 
         // Get initial active window
         compositor.active_window = compositor.conn.get_active_window();
+
+        // Apply HDR config if enabled
+        if let Some(ref lua) = compositor.lua_config {
+            let hdr_config = lua.get_hdr_config();
+            if hdr_config.enabled {
+                tracing::info!("Enabling HDR from config");
+                compositor.renderer.enable_hdr(hdr_config);
+            }
+        }
 
         // Scan existing windows
         compositor.scan_windows()?;
@@ -258,24 +295,9 @@ impl Compositor {
             Event::UnmapNotify(e) => self.handle_unmap(e),
             Event::ConfigureNotify(e) => self.handle_configure(e)?,
             Event::PropertyNotify(e) => self.handle_property(e)?,
+            Event::DamageNotify(e) => self.handle_damage(e),
             Event::Error(e) => {
                 tracing::warn!("X11 error: {:?}", e);
-            }
-            Event::Unknown(raw) => {
-                // Check for damage events by response type (first byte)
-                if !raw.is_empty() {
-                    let response_type = raw[0] & 0x7f; // Mask out the "sent" flag
-                    if response_type == self.conn.damage_event_base {
-                        if raw.len() >= 8 {
-                            let drawable = u32::from_ne_bytes([raw[4], raw[5], raw[6], raw[7]]);
-                            if let Some(tracked) = self.windows.get_mut(&drawable) {
-                                tracked.damaged = true;
-                                self.needs_redraw = true;
-                                let _ = self.conn.conn.damage_subtract(tracked.damage, 0u32, 0u32);
-                            }
-                        }
-                    }
-                }
             }
             _ => {}
         }
@@ -406,6 +428,17 @@ impl Compositor {
         }
 
         Ok(())
+    }
+
+    fn handle_damage(&mut self, event: DamageNotifyEvent) {
+        let drawable = event.drawable;
+
+        if let Some(tracked) = self.windows.get_mut(&drawable) {
+            tracked.damaged = true;
+            self.needs_redraw = true;
+            // Subtract damage region to clear it
+            let _ = self.conn.conn.damage_subtract(tracked.damage, 0u32, 0u32);
+        }
     }
 
     fn get_window_opacity(&self, window: Window) -> f32 {
@@ -711,6 +744,70 @@ impl Compositor {
     /// Check if connected to gar.
     pub fn is_connected_to_gar(&self) -> bool {
         self.gar.is_connected()
+    }
+
+    /// Reload configuration from Lua file.
+    ///
+    /// Returns Ok(()) if successful, or a string error message if failed.
+    pub fn reload_config(&mut self) -> std::result::Result<(), String> {
+        let lua_config = match &mut self.lua_config {
+            Some(lua) => lua,
+            None => {
+                // Try to create a new LuaConfig if we don't have one
+                match LuaConfig::new() {
+                    Ok(lua) => {
+                        self.lua_config = Some(lua);
+                        self.lua_config.as_mut().unwrap()
+                    }
+                    Err(e) => return Err(format!("Failed to create Lua config: {}", e)),
+                }
+            }
+        };
+
+        // Reload the config file
+        if let Err(e) = lua_config.load() {
+            return Err(format!("Failed to load config: {}", e));
+        }
+
+        // Apply new effects configuration
+        self.effects = EffectsConfig::from_lua_config(lua_config);
+
+        tracing::info!(
+            "Reloaded config: blur={}, shadows={}, corners={:.1}px, fade={}",
+            self.effects.blur_enabled,
+            self.effects.shadow_enabled,
+            self.effects.corner_radius,
+            self.effects.fade_enabled
+        );
+
+        // Update renderer's shadow config
+        use crate::render::ShadowConfig;
+        self.renderer.update_shadow_config(ShadowConfig {
+            color: self.effects.shadow_color,
+            opacity: self.effects.shadow_opacity,
+            spread: self.effects.shadow_radius, // spread controls shadow size
+            blur_radius: self.effects.shadow_radius,
+            offset: [self.effects.shadow_offset.0, self.effects.shadow_offset.1],
+        });
+
+        // Update renderer's blur config
+        self.renderer.update_blur_config(
+            self.effects.blur_enabled,
+            self.effects.blur_strength,
+        );
+
+        // Check for HDR config changes
+        let hdr_config = lua_config.get_hdr_config();
+        if hdr_config.enabled {
+            self.renderer.enable_hdr(hdr_config);
+        } else {
+            self.renderer.disable_hdr();
+        }
+
+        // Request redraw with new settings
+        self.needs_redraw = true;
+
+        Ok(())
     }
 
     /// Shutdown the compositor cleanly.

@@ -74,21 +74,39 @@ fn sdf_rounded_rect(p: vec2<f32>, size: vec2<f32>, radius: f32) -> f32 {
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let color = textureSample(t_diffuse, s_diffuse, in.tex_coords);
 
-    // Calculate alpha based on corner radius
-    var alpha = color.a * uniforms.opacity;
+    // Use texture alpha, defaulting to opaque for depth-24 windows
+    var base_alpha = color.a;
+    if base_alpha < 0.01 {
+        base_alpha = 1.0;
+    }
+
+    var alpha = base_alpha * uniforms.opacity;
 
     if uniforms.corner_radius > 0.0 {
-        // Convert local position (0-1) to pixel coordinates centered at origin
         let pixel_pos = (in.local_pos - 0.5) * uniforms.window_size;
         let half_size = uniforms.window_size * 0.5;
-
-        // Calculate SDF
         let dist = sdf_rounded_rect(pixel_pos, half_size, uniforms.corner_radius);
-
-        // Smooth edge (anti-aliasing)
-        // Use 1 pixel for smooth transition
         alpha *= 1.0 - smoothstep(-1.0, 1.0, dist);
     }
 
     return vec4<f32>(color.rgb, alpha);
+
+    // Normal rendering code (disabled for debugging):
+    /*
+    var base_alpha = color.a;
+    if base_alpha < 0.01 {
+        base_alpha = 1.0;
+    }
+
+    var alpha = base_alpha * uniforms.opacity;
+
+    if uniforms.corner_radius > 0.0 {
+        let pixel_pos = (in.local_pos - 0.5) * uniforms.window_size;
+        let half_size = uniforms.window_size * 0.5;
+        let dist = sdf_rounded_rect(pixel_pos, half_size, uniforms.corner_radius);
+        alpha *= 1.0 - smoothstep(-1.0, 1.0, dist);
+    }
+
+    return vec4<f32>(color.rgb, alpha);
+    */
 }

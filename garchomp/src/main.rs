@@ -139,17 +139,55 @@ fn handle_ipc_request(compositor: &mut compositor::Compositor, request: ipc::Cli
         Request::Ping => Response::Pong,
         Request::Reload => {
             tracing::info!("Config reload requested");
-            // TODO: Implement config reload
-            Response::Ok
+            match compositor.reload_config() {
+                Ok(()) => Response::Ok,
+                Err(msg) => Response::Error { message: msg },
+            }
         }
         Request::SetEffect { effect, enabled } => {
             tracing::info!("Set effect {} = {}", effect, enabled);
-            // TODO: Implement effect toggle
-            Response::Ok
+            let result = match effect.as_str() {
+                "blur" => {
+                    compositor.effects.blur_enabled = *enabled;
+                    Ok(())
+                }
+                "shadows" => {
+                    compositor.effects.shadow_enabled = *enabled;
+                    Ok(())
+                }
+                "animations" | "fade" => {
+                    compositor.effects.fade_enabled = *enabled;
+                    Ok(())
+                }
+                "hdr" => {
+                    if *enabled {
+                        let config = crate::render::HdrConfig {
+                            enabled: true,
+                            peak_luminance: 1000.0,
+                            paper_white: 203.0,
+                            tonemap_operator: crate::render::TonemapOperator::Aces,
+                            display_hdr_capable: false,
+                        };
+                        compositor.renderer.enable_hdr(config);
+                    } else {
+                        compositor.renderer.disable_hdr();
+                    }
+                    Ok(())
+                }
+                _ => Err(format!("Unknown effect: {}", effect)),
+            };
+            match result {
+                Ok(()) => {
+                    compositor.request_redraw();
+                    Response::Ok
+                }
+                Err(msg) => Response::Error { message: msg },
+            }
         }
         Request::SetBlurStrength { strength } => {
             tracing::info!("Set blur strength = {}", strength);
-            // TODO: Implement blur strength
+            compositor.effects.blur_strength = *strength;
+            compositor.request_redraw();
             Response::Ok
         }
         Request::GetWindowInfo { window } => {

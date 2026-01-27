@@ -86,7 +86,6 @@ pub struct CompositePipeline {
     pipeline: wgpu::RenderPipeline,
     vertex_buffer: wgpu::Buffer,
     index_buffer: wgpu::Buffer,
-    uniform_buffer: wgpu::Buffer,
     bind_group_layout: wgpu::BindGroupLayout,
     sampler: wgpu::Sampler,
 }
@@ -192,13 +191,6 @@ impl CompositePipeline {
             usage: wgpu::BufferUsages::INDEX,
         });
 
-        // Create uniform buffer
-        let uniform_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("composite_uniform_buffer"),
-            contents: bytemuck::cast_slice(&[Uniforms::default()]),
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-        });
-
         // Create sampler
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("composite_sampler"),
@@ -215,17 +207,26 @@ impl CompositePipeline {
             pipeline,
             vertex_buffer,
             index_buffer,
-            uniform_buffer,
             bind_group_layout,
             sampler,
         }
     }
 
-    /// Create a bind group for a texture.
+    /// Create a uniform buffer for a window.
+    pub fn create_uniform_buffer(&self, device: &wgpu::Device) -> wgpu::Buffer {
+        device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("composite_uniform_buffer"),
+            contents: bytemuck::cast_slice(&[Uniforms::default()]),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        })
+    }
+
+    /// Create a bind group for a texture with its own uniform buffer.
     pub fn create_bind_group(
         &self,
         device: &wgpu::Device,
         texture_view: &wgpu::TextureView,
+        uniform_buffer: &wgpu::Buffer,
     ) -> wgpu::BindGroup {
         device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("composite_bind_group"),
@@ -233,7 +234,7 @@ impl CompositePipeline {
             entries: &[
                 wgpu::BindGroupEntry {
                     binding: 0,
-                    resource: self.uniform_buffer.as_entire_binding(),
+                    resource: uniform_buffer.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 1,
@@ -251,6 +252,7 @@ impl CompositePipeline {
     pub fn update_uniforms(
         &self,
         queue: &wgpu::Queue,
+        uniform_buffer: &wgpu::Buffer,
         x: f32,
         y: f32,
         width: f32,
@@ -268,7 +270,7 @@ impl CompositePipeline {
             window_size: [width, height],
             _padding: [0.0, 0.0],
         };
-        queue.write_buffer(&self.uniform_buffer, 0, bytemuck::cast_slice(&[uniforms]));
+        queue.write_buffer(uniform_buffer, 0, bytemuck::cast_slice(&[uniforms]));
     }
 
     /// Render a quad with the given bind group.

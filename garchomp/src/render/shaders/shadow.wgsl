@@ -76,28 +76,31 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let half_window = uniforms.window_size * 0.5;
     let dist = sdf_rounded_rect(pixel_pos, half_window, uniforms.corner_radius);
 
-    // Shadow falloff using smooth gaussian-like curve
-    // The shadow starts at the window edge (dist = 0) and fades over blur_radius
+    // Softer shadow falloff using smoothstep for gradual transition
+    // blur_radius controls the fade distance
     let blur = max(uniforms.blur_radius, 1.0);
 
-    // Normalize distance to blur radius for smooth falloff
-    let normalized_dist = dist / blur;
-
-    // Gaussian-like falloff
-    var shadow_alpha = 0.0;
-    if normalized_dist < 3.0 {
-        // Approximate gaussian falloff: exp(-x^2 / 2)
-        let x = normalized_dist;
-        shadow_alpha = exp(-x * x * 0.5);
-    }
-
-    // Only show shadow outside the window
+    // Only render shadow outside the window
     if dist < 0.0 {
-        shadow_alpha = 0.0;
+        return vec4<f32>(0.0);
     }
+
+    // INVARIANT: Fade must complete within spread distance to avoid hard edges.
+    // The shadow quad extends `spread` pixels beyond the window on each side.
+    // If fade_distance > spread, the shadow would be cut off abruptly at the quad edge.
+    // Using spread directly ensures a smooth fade to zero at the quad boundary.
+    let fade_distance = uniforms.spread;
+
+    // Normalize distance to 0-1 range within the spread
+    let t = clamp(dist / fade_distance, 0.0, 1.0);
+
+    // Apply a soft falloff curve (quintic smoothstep for very smooth fade)
+    let t2 = t * t;
+    let t3 = t2 * t;
+    let shadow_alpha = 1.0 - (6.0 * t3 * t2 - 15.0 * t2 * t2 + 10.0 * t3);
 
     // Apply shadow opacity
-    shadow_alpha *= uniforms.opacity;
+    let final_alpha = shadow_alpha * uniforms.opacity;
 
-    return vec4<f32>(uniforms.color, shadow_alpha);
+    return vec4<f32>(uniforms.color, final_alpha);
 }

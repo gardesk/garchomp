@@ -47,13 +47,18 @@ impl TextureManager {
         queue: &wgpu::Queue,
         window_id: u32,
         pixmap: u64,
-        width: u32,
-        height: u32,
+        _width: u32,
+        _height: u32,
     ) -> Result<&WindowTexture, GpuError> {
-        // Query pixmap depth via XGetGeometry
-        let depth = self.get_pixmap_depth(pixmap);
+        // Query actual pixmap geometry - this gives us the true dimensions
+        // The window geometry might include borders, but the pixmap is just content
+        let (width, height, depth) = self.get_pixmap_geometry(pixmap);
 
-        // Get pixel data from pixmap
+        if width == 0 || height == 0 {
+            return Err(GpuError::GetImageFailed { pixmap, width, height });
+        }
+
+        // Get pixel data from pixmap using actual dimensions
         let pixels = self.get_pixmap_data(pixmap, width, height, depth)?;
 
         // Check if texture exists and has the right size
@@ -64,6 +69,13 @@ impl TextureManager {
 
         if needs_recreate {
             // Create new texture
+            // Use sRGB format since X11 pixmap data is gamma-encoded (sRGB)
+            // Use Rgba8UnormSrgb for GL backend compatibility
+            tracing::debug!(
+                "Creating texture for window {:#x}: {}x{}",
+                window_id, width, height
+            );
+
             let texture = device.create_texture(&wgpu::TextureDescriptor {
                 label: Some(&format!("window_texture_{}", window_id)),
                 size: wgpu::Extent3d {
@@ -74,10 +86,13 @@ impl TextureManager {
                 mip_level_count: 1,
                 sample_count: 1,
                 dimension: wgpu::TextureDimension::D2,
-                format: wgpu::TextureFormat::Bgra8UnormSrgb,
+                // Use RGBA format for GL backend compatibility
+                format: wgpu::TextureFormat::Rgba8UnormSrgb,
                 usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
                 view_formats: &[],
             });
+
+            tracing::trace!("Texture created for window {:#x}", window_id);
 
             let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
 
@@ -117,8 +132,9 @@ impl TextureManager {
         Ok(self.textures.get(&window_id).unwrap())
     }
 
-    /// Get the depth of a pixmap via XGetGeometry.
-    fn get_pixmap_depth(&self, pixmap: u64) -> u8 {
+    /// Get the geometry of a pixmap via XGetGeometry.
+    /// Returns (width, height, depth). Returns (0, 0, 24) on failure.
+    fn get_pixmap_geometry(&self, pixmap: u64) -> (u32, u32, u8) {
         let mut root: u64 = 0;
         let mut x: i32 = 0;
         let mut y: i32 = 0;
@@ -142,10 +158,10 @@ impl TextureManager {
         };
 
         if status == 0 {
-            // Failed - assume 24-bit (no alpha)
-            24
+            // Failed
+            (0, 0, 24)
         } else {
-            depth as u8
+            (width, height, depth as u8)
         }
     }
 
@@ -154,6 +170,9 @@ impl TextureManager {
         // Get the default visual for depth/color info
         let screen = unsafe { (self.xlib.XDefaultScreen)(self.display) };
         let visual = unsafe { (self.xlib.XDefaultVisual)(self.display, screen) };
+
+        // Sync display to ensure pixmap is ready
+        unsafe { (self.xlib.XSync)(self.display, 0) };
 
         // Get the image data from the pixmap
         let image = unsafe {
@@ -170,10 +189,11 @@ impl TextureManager {
         };
 
         if image.is_null() {
+            tracing::warn!("XGetImage failed for pixmap {:#x} ({}x{}, depth={})", pixmap, width, height, depth);
             return Err(GpuError::GetImageFailed { pixmap, width, height });
         }
 
-        // Convert to BGRA8 pixel data, using depth to determine alpha handling
+        // Convert to RGBA pixel data, using depth to determine alpha handling
         let pixels = unsafe { self.convert_ximage_to_bgra(image, width, height, visual, depth) };
 
         // Free the XImage
@@ -203,9 +223,20 @@ impl TextureManager {
         let bytes_per_line = img.bytes_per_line as usize;
         let bits_per_pixel = img.bits_per_pixel;
         let data = img.data as *const u8;
+        let byte_order = img.byte_order;
+        let bitmap_bit_order = img.bitmap_bit_order;
+
+        tracing::trace!(
+            "XImage: {}x{}, depth={}, bpp={}, bytes_per_line={}",
+            width, height, depth, bits_per_pixel, bytes_per_line
+        );
 
         // True ARGB windows have depth 32; depth 24 windows have no real alpha
         let has_real_alpha = depth >= 32;
+
+        // X11 byte order constants
+        const LSBFIRST: i32 = 0;
+        const MSBFIRST: i32 = 1;
 
         for y in 0..height {
             for x in 0..width {
@@ -214,16 +245,27 @@ impl TextureManager {
 
                 match bits_per_pixel {
                     32 => {
-                        // BGRA or BGRX format
+                        // Read raw bytes
                         // SAFETY: src_offset is within image bounds
-                        let b = unsafe { *data.add(src_offset) };
-                        let g = unsafe { *data.add(src_offset + 1) };
-                        let r = unsafe { *data.add(src_offset + 2) };
-                        let a = unsafe { *data.add(src_offset + 3) };
+                        let byte0 = unsafe { *data.add(src_offset) };
+                        let byte1 = unsafe { *data.add(src_offset + 1) };
+                        let byte2 = unsafe { *data.add(src_offset + 2) };
+                        let byte3 = unsafe { *data.add(src_offset + 3) };
 
-                        pixels[dst_offset] = b;
+                        // X11 byte order determines how pixel is stored:
+                        // LSBFirst (little-endian): memory = [B, G, R, A/X]
+                        // MSBFirst (big-endian): memory = [A/X, R, G, B]
+                        let (b, g, r, a) = if byte_order == LSBFIRST {
+                            (byte0, byte1, byte2, byte3)
+                        } else {
+                            // MSBFirst: memory is [A, R, G, B]
+                            (byte3, byte2, byte1, byte0)
+                        };
+
+                        // Output in RGBA format for wgpu texture (GL backend compatibility)
+                        pixels[dst_offset] = r;
                         pixels[dst_offset + 1] = g;
-                        pixels[dst_offset + 2] = r;
+                        pixels[dst_offset + 2] = b;
 
                         // For true 32-bit depth windows, preserve alpha exactly.
                         // For 24-bit windows displayed as 32bpp, alpha byte is garbage/0,
@@ -231,23 +273,34 @@ impl TextureManager {
                         pixels[dst_offset + 3] = if has_real_alpha { a } else { 255 };
                     }
                     24 => {
-                        // BGR format - always opaque
+                        // BGR or RGB format depending on byte order
                         // SAFETY: src_offset is within image bounds
-                        let b = unsafe { *data.add(src_offset) };
-                        let g = unsafe { *data.add(src_offset + 1) };
-                        let r = unsafe { *data.add(src_offset + 2) };
+                        let byte0 = unsafe { *data.add(src_offset) };
+                        let byte1 = unsafe { *data.add(src_offset + 1) };
+                        let byte2 = unsafe { *data.add(src_offset + 2) };
 
-                        pixels[dst_offset] = b;
+                        let (b, g, r) = if byte_order == LSBFIRST {
+                            (byte0, byte1, byte2)
+                        } else {
+                            (byte2, byte1, byte0)
+                        };
+
+                        // Output in RGBA format
+                        pixels[dst_offset] = r;
                         pixels[dst_offset + 1] = g;
-                        pixels[dst_offset + 2] = r;
+                        pixels[dst_offset + 2] = b;
                         pixels[dst_offset + 3] = 255;
                     }
                     16 => {
-                        // Assume RGB565 - always opaque
+                        // RGB565 format
                         // SAFETY: src_offset is within image bounds
                         let lo = unsafe { *data.add(src_offset) as u16 };
                         let hi = unsafe { *data.add(src_offset + 1) as u16 };
-                        let pixel = lo | (hi << 8);
+                        let pixel = if byte_order == LSBFIRST {
+                            lo | (hi << 8)
+                        } else {
+                            (lo << 8) | hi
+                        };
 
                         let r = ((pixel >> 11) & 0x1F) as u8;
                         let g = ((pixel >> 5) & 0x3F) as u8;

@@ -1,5 +1,7 @@
 //! Effects configuration for the compositor.
 
+use crate::config::LuaConfig;
+
 /// Configuration for all compositor visual effects.
 #[derive(Debug, Clone)]
 pub struct EffectsConfig {
@@ -61,8 +63,8 @@ impl Default for EffectsConfig {
             opacity_focused: 1.0,
             opacity_unfocused: 1.0,
 
-            // Fading (enabled with reasonable defaults)
-            fade_enabled: true,
+            // Fading (disabled for testing)
+            fade_enabled: false,
             fade_in_duration: 0.1,
             fade_out_duration: 0.1,
         }
@@ -70,6 +72,44 @@ impl Default for EffectsConfig {
 }
 
 impl EffectsConfig {
+    /// Load effects configuration from Lua config.
+    ///
+    /// Reads settings from the loaded Lua config file and applies them.
+    /// Falls back to defaults for any unset values.
+    pub fn from_lua_config(lua: &LuaConfig) -> Self {
+        let (blur_enabled, blur_strength, _blur_iterations) = lua.get_blur_config();
+        let (shadow_enabled, shadow_radius, shadow_offset_x, shadow_offset_y, shadow_opacity) =
+            lua.get_shadow_config();
+        let corner_radius = lua.get_corner_radius();
+        let default_opacity = lua.get_default_opacity();
+
+        // Read additional settings with defaults
+        let opacity_focused: f32 = lua.get_setting("opacity_focused").unwrap_or(1.0);
+        let opacity_unfocused: f32 = lua.get_setting("opacity_unfocused").unwrap_or(1.0);
+        let fade_enabled: bool = lua.get_setting("fade_enabled").unwrap_or(false);
+        let fade_in_duration: f32 = lua.get_setting("fade_in_duration").unwrap_or(0.1);
+        let fade_out_duration: f32 = lua.get_setting("fade_out_duration").unwrap_or(0.1);
+        let shadow_color_r: f32 = lua.get_setting("shadow_color_r").unwrap_or(0.0);
+        let shadow_color_g: f32 = lua.get_setting("shadow_color_g").unwrap_or(0.0);
+        let shadow_color_b: f32 = lua.get_setting("shadow_color_b").unwrap_or(0.0);
+
+        Self {
+            blur_enabled,
+            blur_strength: blur_strength as u32,
+            shadow_enabled,
+            shadow_radius,
+            shadow_opacity,
+            shadow_offset: (shadow_offset_x, shadow_offset_y),
+            shadow_color: [shadow_color_r, shadow_color_g, shadow_color_b],
+            corner_radius,
+            opacity_focused: opacity_focused * default_opacity,
+            opacity_unfocused: opacity_unfocused * default_opacity,
+            fade_enabled,
+            fade_in_duration,
+            fade_out_duration,
+        }
+    }
+
     /// Calculate effective opacity for a window based on focus state.
     pub fn effective_opacity(&self, base_opacity: f32, focused: bool) -> f32 {
         let multiplier = if focused {

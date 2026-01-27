@@ -24,10 +24,10 @@ impl Default for ShadowConfig {
     fn default() -> Self {
         Self {
             color: [0.0, 0.0, 0.0], // Black
-            opacity: 0.5,
-            spread: 15.0,
-            blur_radius: 12.0,
-            offset: [0.0, 5.0], // Slight downward offset (light from above)
+            opacity: 0.35,          // Subtle shadow
+            spread: 25.0,           // Shadow extends 25px beyond window
+            blur_radius: 12.0,      // Unused (spread controls fade distance now)
+            offset: [0.0, 6.0],     // Slight downward offset (light from above)
         }
     }
 }
@@ -246,10 +246,8 @@ impl ShadowPipeline {
             blur_radius: config.blur_radius,
             corner_radius,
             _pad1: 0.0,
-            offset: [
-                config.offset[0] / shadow_width,
-                config.offset[1] / shadow_height,
-            ],
+            // Pass raw pixel offset - shader will normalize
+            offset: config.offset,
             _pad2: [0.0; 4],
         };
 
