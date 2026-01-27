@@ -3,12 +3,15 @@
 use std::time::{Duration, Instant};
 
 /// Easing function type.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Easing {
     Linear,
     EaseIn,
     EaseOut,
     EaseInOut,
+    Bounce,
+    /// Cubic bezier with control points (x1, y1, x2, y2).
+    CubicBezier(f32, f32, f32, f32),
 }
 
 impl Easing {
@@ -26,6 +29,88 @@ impl Easing {
                     1.0 - (-2.0 * t + 2.0).powi(2) / 2.0
                 }
             }
+            Easing::Bounce => Self::bounce_ease_out(t),
+            Easing::CubicBezier(x1, y1, x2, y2) => Self::cubic_bezier(t, x1, y1, x2, y2),
+        }
+    }
+
+    /// Bounce easing (ease-out).
+    fn bounce_ease_out(t: f32) -> f32 {
+        const N1: f32 = 7.5625;
+        const D1: f32 = 2.75;
+
+        if t < 1.0 / D1 {
+            N1 * t * t
+        } else if t < 2.0 / D1 {
+            let t = t - 1.5 / D1;
+            N1 * t * t + 0.75
+        } else if t < 2.5 / D1 {
+            let t = t - 2.25 / D1;
+            N1 * t * t + 0.9375
+        } else {
+            let t = t - 2.625 / D1;
+            N1 * t * t + 0.984375
+        }
+    }
+
+    /// Cubic bezier easing.
+    /// Uses Newton-Raphson iteration to find t for the given x.
+    fn cubic_bezier(t: f32, x1: f32, y1: f32, x2: f32, y2: f32) -> f32 {
+        // For t=0 or t=1, return directly
+        if t <= 0.0 {
+            return 0.0;
+        }
+        if t >= 1.0 {
+            return 1.0;
+        }
+
+        // Newton-Raphson to find the parameter for x
+        let mut guess = t;
+        for _ in 0..8 {
+            let x = Self::bezier_sample(guess, x1, x2) - t;
+            if x.abs() < 0.001 {
+                break;
+            }
+            let dx = Self::bezier_slope(guess, x1, x2);
+            if dx.abs() < 0.000001 {
+                break;
+            }
+            guess -= x / dx;
+        }
+
+        Self::bezier_sample(guess.clamp(0.0, 1.0), y1, y2)
+    }
+
+    /// Sample a cubic bezier curve at parameter t.
+    fn bezier_sample(t: f32, p1: f32, p2: f32) -> f32 {
+        // B(t) = 3(1-t)²t·P1 + 3(1-t)t²·P2 + t³
+        let t2 = t * t;
+        let t3 = t2 * t;
+        let mt = 1.0 - t;
+        let mt2 = mt * mt;
+
+        3.0 * mt2 * t * p1 + 3.0 * mt * t2 * p2 + t3
+    }
+
+    /// Get the slope of a cubic bezier curve at parameter t.
+    fn bezier_slope(t: f32, p1: f32, p2: f32) -> f32 {
+        // B'(t) = 3(1-t)²·P1 + 6(1-t)t·(P2-P1) + 3t²·(1-P2)
+        let t2 = t * t;
+        let mt = 1.0 - t;
+        let mt2 = mt * mt;
+
+        3.0 * mt2 * p1 + 6.0 * mt * t * (p2 - p1) + 3.0 * t2 * (1.0 - p2)
+    }
+
+    /// Parse easing from name string.
+    pub fn from_name(name: &str) -> Self {
+        match name.to_lowercase().as_str() {
+            "linear" => Self::Linear,
+            "ease-in" | "easein" => Self::EaseIn,
+            "ease-out" | "easeout" => Self::EaseOut,
+            "ease-in-out" | "easeinout" => Self::EaseInOut,
+            "bounce" => Self::Bounce,
+            _ => Self::EaseOut, // Default
         }
     }
 }
