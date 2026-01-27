@@ -1,0 +1,35 @@
+[workspace]
+resolver = "2"
+members = ["garchomp", "garchompctl", "garchomp-ipc"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+authors = ["gardesk contributors"]
+license = "MIT"
+repository = "https://github.com/gardesk/garchomp"
+
+[workspace.dependencies]
+# X11
+x11rb = { version = "0.13", features = ["allow-unsafe-code", "randr", "composite", "damage", "xfixes", "shape", "render"] }
+
+# Async
+tokio = { version = "1", features = ["full", "signal"] }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# CLI
+clap = { version = "4", features = ["derive"] }
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Errors
+thiserror = "2"
+anyhow = "1"
+
+# Internal
+garchomp-ipc = { path = "garchomp-ipc" }

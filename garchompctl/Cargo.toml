@@ -1,0 +1,12 @@
+[package]
+name = "garchompctl"
+description = "Control utility for garchomp compositor"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+garchomp-ipc = { workspace = true }
+clap = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }

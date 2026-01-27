@@ -1,0 +1,10 @@
+[package]
+name = "garchomp-ipc"
+description = "IPC types for garchomp compositor"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
