@@ -154,6 +154,7 @@ fn handle_ipc_request(compositor: &mut compositor::Compositor, request: ipc::Cli
         }
         Request::GetWindowInfo { window } => {
             if let Some(tracked) = compositor.windows.get(&(*window as u32)) {
+                let focused = compositor.is_window_focused(tracked.id);
                 Response::WindowInfo(WindowInfo {
                     id: tracked.id,
                     x: tracked.x,
@@ -162,6 +163,11 @@ fn handle_ipc_request(compositor: &mut compositor::Compositor, request: ipc::Cli
                     height: tracked.height,
                     mapped: tracked.mapped,
                     override_redirect: tracked.override_redirect,
+                    workspace: compositor.workspaces.get_window_workspace(tracked.id),
+                    focused,
+                    fullscreen: false, // TODO: track fullscreen state
+                    class: None,       // TODO: get WM_CLASS
+                    title: None,       // TODO: get _NET_WM_NAME
                 })
             } else {
                 Response::Error {
@@ -173,17 +179,46 @@ fn handle_ipc_request(compositor: &mut compositor::Compositor, request: ipc::Cli
             let windows: Vec<WindowInfo> = compositor
                 .windows
                 .values()
-                .map(|w| WindowInfo {
-                    id: w.id,
-                    x: w.x,
-                    y: w.y,
-                    width: w.width,
-                    height: w.height,
-                    mapped: w.mapped,
-                    override_redirect: w.override_redirect,
+                .map(|w| {
+                    let focused = compositor.is_window_focused(w.id);
+                    WindowInfo {
+                        id: w.id,
+                        x: w.x,
+                        y: w.y,
+                        width: w.width,
+                        height: w.height,
+                        mapped: w.mapped,
+                        override_redirect: w.override_redirect,
+                        workspace: compositor.workspaces.get_window_workspace(w.id),
+                        focused,
+                        fullscreen: false,
+                        class: None,
+                        title: None,
+                    }
                 })
                 .collect();
             Response::WindowList { windows }
+        }
+        Request::Version { version } => {
+            tracing::debug!("Client version: {}", version);
+            Response::Version {
+                version: garchomp_ipc::PROTOCOL_VERSION,
+                name: "garchomp".to_string(),
+            }
+        }
+        Request::Status => {
+            Response::Status(garchomp_ipc::CompositorStatus {
+                version: garchomp_ipc::PROTOCOL_VERSION,
+                window_count: compositor.windows.len(),
+                current_workspace: compositor.workspaces.current,
+                effects_enabled: garchomp_ipc::EffectsStatus {
+                    blur: compositor.effects.blur_enabled,
+                    shadows: compositor.effects.shadow_enabled,
+                    animations: compositor.effects.fade_enabled,
+                    blur_strength: compositor.effects.blur_strength,
+                },
+                connected_to_gar: compositor.is_connected_to_gar(),
+            })
         }
     };
 

@@ -3,13 +3,17 @@
 mod animation;
 mod config;
 mod window;
+mod workspace;
 
 pub use animation::{Animation, Easing, WindowAnimations};
 pub use config::EffectsConfig;
 pub use window::{TrackedWindow, WindowType};
+pub use workspace::{TransitionDirection, WorkspaceState, WorkspaceTransition};
 
+use crate::ipc::GarConnection;
 use crate::render::{GpuError, Renderer, WindowRenderInfo};
 use crate::x11::{CompositeExt, Connection};
+use garchomp_ipc::GarEvent;
 use std::collections::HashMap;
 use thiserror::Error;
 use x11rb::connection::Connection as _;
@@ -50,6 +54,10 @@ pub struct Compositor {
     active_window: Option<Window>,
     /// Effects configuration.
     pub effects: EffectsConfig,
+    /// Workspace state tracking.
+    pub workspaces: WorkspaceState,
+    /// Connection to gar window manager.
+    pub gar: GarConnection,
 }
 
 impl Compositor {
@@ -86,6 +94,10 @@ impl Compositor {
 
         conn.flush()?;
 
+        // Try to connect to gar
+        let mut gar = GarConnection::new();
+        gar.connect();
+
         let mut compositor = Self {
             conn,
             overlay,
@@ -95,6 +107,8 @@ impl Compositor {
             needs_redraw: true,
             active_window: None,
             effects: EffectsConfig::default(),
+            workspaces: WorkspaceState::new(),
+            gar,
         };
 
         // Get initial active window
@@ -570,6 +584,133 @@ impl Compositor {
     pub fn resize(&mut self, width: u32, height: u32) {
         self.renderer.resize(width, height);
         self.needs_redraw = true;
+    }
+
+    /// Handle an event from gar window manager.
+    pub fn handle_gar_event(&mut self, event: GarEvent) {
+        match event {
+            GarEvent::WorkspaceChanged { from, to, direction } => {
+                self.handle_workspace_change(from, to, &direction);
+            }
+            GarEvent::FocusChanged { old, new } => {
+                self.handle_focus_change(old, new);
+            }
+            GarEvent::WindowFullscreen { window, fullscreen } => {
+                self.handle_fullscreen(window, fullscreen);
+            }
+            GarEvent::WindowMoved { window, x, y } => {
+                if let Some(tracked) = self.windows.get_mut(&window) {
+                    tracked.x = x as i16;
+                    tracked.y = y as i16;
+                    tracked.damaged = true;
+                    self.needs_redraw = true;
+                }
+            }
+            GarEvent::WindowResized { window, width, height } => {
+                if let Some(tracked) = self.windows.get_mut(&window) {
+                    tracked.width = width as u16;
+                    tracked.height = height as u16;
+                    tracked.damaged = true;
+                    self.needs_redraw = true;
+                }
+            }
+            GarEvent::WindowWorkspace { window, workspace } => {
+                self.workspaces.assign_window(window, workspace);
+                self.needs_redraw = true;
+            }
+            GarEvent::Sync { windows, current_workspace } => {
+                tracing::info!("Received sync from gar: {} windows, workspace {}",
+                    windows.len(), current_workspace);
+                self.workspaces.set_current(current_workspace);
+                // TODO: sync window workspace assignments
+                self.needs_redraw = true;
+            }
+        }
+    }
+
+    /// Handle workspace change event from gar.
+    fn handle_workspace_change(&mut self, from: usize, to: usize, direction: &str) {
+        tracing::debug!("Workspace change: {} -> {} ({})", from, to, direction);
+        self.workspaces.start_transition(from, to, direction);
+        self.needs_redraw = true;
+    }
+
+    /// Handle focus change event from gar.
+    fn handle_focus_change(&mut self, old: Option<u32>, new: Option<u32>) {
+        tracing::debug!("Focus change: {:?} -> {:?}", old, new);
+
+        // Update active window
+        self.active_window = new;
+
+        // Trigger unfocus animation on old window
+        if let Some(old_id) = old {
+            if let Some(tracked) = self.windows.get_mut(&old_id) {
+                if self.effects.fade_enabled {
+                    // Start a subtle dim animation for unfocused window
+                    tracked.animations.opacity = Some(Animation::new(
+                        1.0,
+                        self.effects.opacity_unfocused,
+                        std::time::Duration::from_millis(150),
+                        Easing::EaseOut,
+                    ));
+                }
+            }
+        }
+
+        // Trigger focus animation on new window
+        if let Some(new_id) = new {
+            if let Some(tracked) = self.windows.get_mut(&new_id) {
+                if self.effects.fade_enabled {
+                    // Brighten focused window
+                    tracked.animations.opacity = Some(Animation::new(
+                        self.effects.opacity_unfocused,
+                        1.0,
+                        std::time::Duration::from_millis(150),
+                        Easing::EaseOut,
+                    ));
+                }
+            }
+        }
+
+        self.needs_redraw = true;
+    }
+
+    /// Handle fullscreen state change.
+    fn handle_fullscreen(&mut self, window: Window, fullscreen: bool) {
+        tracing::debug!("Fullscreen change: {} = {}", window, fullscreen);
+
+        if fullscreen {
+            // Unredirect window for direct rendering (bypass compositor)
+            if let Err(e) = self.conn.unredirect_window(window) {
+                tracing::warn!("Failed to unredirect fullscreen window: {}", e);
+            }
+        } else {
+            // Redirect window back to compositor
+            if let Err(e) = self.conn.redirect_window(window) {
+                tracing::warn!("Failed to redirect window: {}", e);
+            }
+        }
+
+        if let Some(tracked) = self.windows.get_mut(&window) {
+            tracked.damaged = true;
+        }
+        self.needs_redraw = true;
+    }
+
+    /// Poll for gar events.
+    pub fn poll_gar(&mut self) {
+        // Try to reconnect if disconnected
+        self.gar.try_reconnect();
+
+        // Process any pending events
+        while let Some(event) = self.gar.poll() {
+            self.handle_gar_event(event);
+        }
+    }
+
+    /// Check if connected to gar.
+    pub fn is_connected_to_gar(&self) -> bool {
+        self.gar.is_connected()
     }
 
     /// Shutdown the compositor cleanly.
