@@ -148,6 +148,12 @@ pub struct TrackedWindow {
     pub fullscreen: bool,
     /// Active Lua animation (if any).
     pub lua_animation: Option<LuaAnimation>,
+    /// WM_CLASS class name (e.g., "Firefox", "kitty").
+    pub wm_class: Option<String>,
+    /// WM_CLASS instance name (e.g., "Navigator", "kitty").
+    pub wm_instance: Option<String>,
+    /// Window title from _NET_WM_NAME or WM_NAME.
+    pub wm_name: Option<String>,
 }
 
 impl TrackedWindow {

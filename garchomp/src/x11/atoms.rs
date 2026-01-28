@@ -11,6 +11,9 @@ atom_manager! {
         WM_STATE,
         WM_TRANSIENT_FOR,
 
+        // Text types
+        UTF8_STRING,
+
         // EWMH - Window types
         _NET_WM_WINDOW_TYPE,
         _NET_WM_WINDOW_TYPE_DESKTOP,
@@ -43,6 +46,9 @@ atom_manager! {
         _NET_WM_STATE_BELOW,
         _NET_WM_STATE_DEMANDS_ATTENTION,
         _NET_WM_STATE_FOCUSED,
+
+        // EWMH - Window name
+        _NET_WM_NAME,
 
         // EWMH - Active window
         _NET_ACTIVE_WINDOW,
