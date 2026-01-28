@@ -29,6 +29,10 @@ pub struct WindowRenderInfo {
     pub blur_behind: bool,
     /// Whether this window is currently focused.
     pub focused: bool,
+    /// Scale factor from Lua animation (x, y). Default: (1.0, 1.0).
+    pub scale: (f32, f32),
+    /// Position offset from Lua animation (x, y). Default: (0.0, 0.0).
+    pub offset: (f32, f32),
 }
 
 /// Blur configuration.
@@ -111,6 +115,8 @@ pub struct Renderer {
     test_uniform_buffer: wgpu::Buffer,
     // Bind groups for windows (keyed by window ID) with uniform buffer and actual texture dimensions
     window_bind_groups: HashMap<u32, (wgpu::BindGroup, wgpu::Buffer, u32, u32)>,
+    // Shadow bind groups for windows (keyed by window ID) with uniform buffer
+    shadow_bind_groups: HashMap<u32, (wgpu::BindGroup, wgpu::Buffer)>,
     // Intermediate render target for multi-pass rendering (blur support)
     intermediate_texture: Option<IntermediateTarget>,
     // HDR render target and tonemapping (optional)
@@ -173,6 +179,7 @@ impl Renderer {
             test_texture: Some(test_texture),
             test_uniform_buffer,
             window_bind_groups: HashMap::new(),
+            shadow_bind_groups: HashMap::new(),
             intermediate_texture: None,
             hdr_target: None,
             tonemap_pipeline: None,
@@ -344,16 +351,16 @@ impl Renderer {
                     Ok(tex) => {
                         tracing::trace!("Texture updated for window {:#x} (actual size {}x{})", win.id, tex.width, tex.height);
                         // Create or update bind group for this window with its own uniform buffer
-                        // Only create new uniform buffer if window doesn't have one yet
-                        let uniform_buffer = if let Some((_, existing_buffer, _, _)) = self.window_bind_groups.get(&win.id) {
-                            // Reuse existing buffer (just update bind group with new texture view)
-                            // This is a bit wasteful but simpler - we clone the buffer reference
-                            self.pipeline.create_uniform_buffer(&self.gpu.device)
-                        } else {
-                            self.pipeline.create_uniform_buffer(&self.gpu.device)
-                        };
+                        let uniform_buffer = self.pipeline.create_uniform_buffer(&self.gpu.device);
                         let bind_group = self.pipeline.create_bind_group(&self.gpu.device, &tex.view, &uniform_buffer);
                         self.window_bind_groups.insert(win.id, (bind_group, uniform_buffer, tex.width, tex.height));
+
+                        // Create shadow bind group for windows that need shadows
+                        if win.shadow_enabled && !self.shadow_bind_groups.contains_key(&win.id) {
+                            let shadow_buffer = self.shadow_pipeline.create_uniform_buffer(&self.gpu.device);
+                            let shadow_bind = self.shadow_pipeline.create_bind_group(&self.gpu.device, &shadow_buffer);
+                            self.shadow_bind_groups.insert(win.id, (shadow_bind, shadow_buffer));
+                        }
                     }
                     Err(e) => {
                         tracing::warn!("Failed to update texture for window {:#x}: {}", win.id, e);
@@ -409,41 +416,56 @@ impl Renderer {
             // First pass: render shadows for all windows (back to front)
             for win in windows {
                 if win.shadow_enabled {
-                    // Use actual texture dimensions for shadow sizing
-                    let (w, h) = if let Some((_, _, tex_w, tex_h)) = self.window_bind_groups.get(&win.id) {
-                        (*tex_w as f32, *tex_h as f32)
-                    } else {
-                        (win.width as f32, win.height as f32)
-                    };
-                    self.shadow_pipeline.update_uniforms(
-                        &self.gpu.queue,
-                        win.x as f32,
-                        win.y as f32,
-                        w,
-                        h,
-                        vw as f32,
-                        vh as f32,
-                        win.corner_radius,
-                        &self.shadow_config,
-                    );
-                    self.shadow_pipeline.render(&mut render_pass);
+                    if let Some((shadow_bind, shadow_buffer)) = self.shadow_bind_groups.get(&win.id) {
+                        // Use actual texture dimensions for shadow sizing
+                        let (base_w, base_h) = if let Some((_, _, tex_w, tex_h)) = self.window_bind_groups.get(&win.id) {
+                            (*tex_w as f32, *tex_h as f32)
+                        } else {
+                            (win.width as f32, win.height as f32)
+                        };
+                        // Apply Lua animation transforms
+                        let x = win.x as f32 + win.offset.0;
+                        let y = win.y as f32 + win.offset.1;
+                        let w = base_w * win.scale.0;
+                        let h = base_h * win.scale.1;
+
+                        self.shadow_pipeline.update_uniforms(
+                            &self.gpu.queue,
+                            shadow_buffer,
+                            x,
+                            y,
+                            w,
+                            h,
+                            vw as f32,
+                            vh as f32,
+                            win.corner_radius,
+                            &self.shadow_config,
+                        );
+                        self.shadow_pipeline.render(&mut render_pass, shadow_bind);
+                    }
                 }
             }
 
             // Second pass: render windows (back to front)
             for win in windows.iter() {
                 if let Some((bind_group, uniform_buffer, tex_w, tex_h)) = self.window_bind_groups.get(&win.id) {
+                    // Apply Lua animation transforms: offset position and scale size
+                    let x = win.x as f32 + win.offset.0;
+                    let y = win.y as f32 + win.offset.1;
+                    let w = *tex_w as f32 * win.scale.0;
+                    let h = *tex_h as f32 * win.scale.1;
+
                     tracing::debug!(
-                        "Rendering window {:#x} at ({},{}) size {}x{} opacity={}",
-                        win.id, win.x, win.y, tex_w, tex_h, win.opacity
+                        "Rendering window {:#x} at ({},{}) size {}x{} opacity={} scale=({:.2},{:.2})",
+                        win.id, x, y, w, h, win.opacity, win.scale.0, win.scale.1
                     );
                     self.pipeline.update_uniforms(
                         &self.gpu.queue,
                         uniform_buffer,
-                        win.x as f32,
-                        win.y as f32,
-                        *tex_w as f32,
-                        *tex_h as f32,
+                        x,
+                        y,
+                        w,
+                        h,
                         vw as f32,
                         vh as f32,
                         win.opacity,
@@ -507,23 +529,26 @@ impl Renderer {
             // Render shadows for all windows
             for win in windows {
                 if win.shadow_enabled {
-                    let (w, h) = if let Some((_, _, tex_w, tex_h)) = self.window_bind_groups.get(&win.id) {
-                        (*tex_w as f32, *tex_h as f32)
-                    } else {
-                        (win.width as f32, win.height as f32)
-                    };
-                    self.shadow_pipeline.update_uniforms(
-                        &self.gpu.queue,
-                        win.x as f32,
-                        win.y as f32,
-                        w,
-                        h,
-                        vw as f32,
-                        vh as f32,
-                        win.corner_radius,
-                        &self.shadow_config,
-                    );
-                    self.shadow_pipeline.render(&mut render_pass);
+                    if let Some((shadow_bind, shadow_buffer)) = self.shadow_bind_groups.get(&win.id) {
+                        let (w, h) = if let Some((_, _, tex_w, tex_h)) = self.window_bind_groups.get(&win.id) {
+                            (*tex_w as f32, *tex_h as f32)
+                        } else {
+                            (win.width as f32, win.height as f32)
+                        };
+                        self.shadow_pipeline.update_uniforms(
+                            &self.gpu.queue,
+                            shadow_buffer,
+                            win.x as f32,
+                            win.y as f32,
+                            w,
+                            h,
+                            vw as f32,
+                            vh as f32,
+                            win.corner_radius,
+                            &self.shadow_config,
+                        );
+                        self.shadow_pipeline.render(&mut render_pass, shadow_bind);
+                    }
                 }
             }
 
@@ -595,23 +620,26 @@ impl Renderer {
             // Re-render shadows
             for win in windows {
                 if win.shadow_enabled {
-                    let (w, h) = if let Some((_, _, tex_w, tex_h)) = self.window_bind_groups.get(&win.id) {
-                        (*tex_w as f32, *tex_h as f32)
-                    } else {
-                        (win.width as f32, win.height as f32)
-                    };
-                    self.shadow_pipeline.update_uniforms(
-                        &self.gpu.queue,
-                        win.x as f32,
-                        win.y as f32,
-                        w,
-                        h,
-                        vw as f32,
-                        vh as f32,
-                        win.corner_radius,
-                        &self.shadow_config,
-                    );
-                    self.shadow_pipeline.render(&mut render_pass);
+                    if let Some((shadow_bind, shadow_buffer)) = self.shadow_bind_groups.get(&win.id) {
+                        let (w, h) = if let Some((_, _, tex_w, tex_h)) = self.window_bind_groups.get(&win.id) {
+                            (*tex_w as f32, *tex_h as f32)
+                        } else {
+                            (win.width as f32, win.height as f32)
+                        };
+                        self.shadow_pipeline.update_uniforms(
+                            &self.gpu.queue,
+                            shadow_buffer,
+                            win.x as f32,
+                            win.y as f32,
+                            w,
+                            h,
+                            vw as f32,
+                            vh as f32,
+                            win.corner_radius,
+                            &self.shadow_config,
+                        );
+                        self.shadow_pipeline.render(&mut render_pass, shadow_bind);
+                    }
                 }
             }
 
@@ -693,6 +721,7 @@ impl Renderer {
     pub fn remove_window(&mut self, window_id: u32) {
         self.texture_manager.remove_texture(window_id);
         self.window_bind_groups.remove(&window_id);
+        self.shadow_bind_groups.remove(&window_id);
     }
 
     /// Poll the GPU device and sync display.
@@ -807,12 +836,17 @@ impl Renderer {
         // Create bind groups for HDR pipeline (must use HDR pipeline's bind group layout)
         // Store both bind group and uniform buffer per window
         let mut hdr_bind_groups: HashMap<u32, (wgpu::BindGroup, wgpu::Buffer)> = HashMap::new();
+        let mut hdr_shadow_bind_groups: HashMap<u32, (wgpu::BindGroup, wgpu::Buffer)> = HashMap::new();
         for (id, (_, _, _, _)) in &self.window_bind_groups {
             if let Some(tex) = self.texture_manager.get_texture(*id) {
                 let uniform_buffer = hdr_pipeline.create_uniform_buffer(&self.gpu.device);
                 let bind_group = hdr_pipeline.create_bind_group(&self.gpu.device, &tex.view, &uniform_buffer);
                 hdr_bind_groups.insert(*id, (bind_group, uniform_buffer));
             }
+            // Create HDR shadow bind group for this window
+            let shadow_buffer = hdr_shadow_pipeline.create_uniform_buffer(&self.gpu.device);
+            let shadow_bind = hdr_shadow_pipeline.create_bind_group(&self.gpu.device, &shadow_buffer);
+            hdr_shadow_bind_groups.insert(*id, (shadow_bind, shadow_buffer));
         }
 
         let frame = self.gpu.begin_frame()?;
@@ -848,23 +882,26 @@ impl Renderer {
             // Render shadows using HDR shadow pipeline
             for win in windows {
                 if win.shadow_enabled {
-                    let (w, h) = if let Some((_, _, tex_w, tex_h)) = self.window_bind_groups.get(&win.id) {
-                        (*tex_w as f32, *tex_h as f32)
-                    } else {
-                        (win.width as f32, win.height as f32)
-                    };
-                    hdr_shadow_pipeline.update_uniforms(
-                        &self.gpu.queue,
-                        win.x as f32,
-                        win.y as f32,
-                        w,
-                        h,
-                        vw as f32,
-                        vh as f32,
-                        win.corner_radius,
-                        &self.shadow_config,
-                    );
-                    hdr_shadow_pipeline.render(&mut render_pass);
+                    if let Some((shadow_bind, shadow_buffer)) = hdr_shadow_bind_groups.get(&win.id) {
+                        let (w, h) = if let Some((_, _, tex_w, tex_h)) = self.window_bind_groups.get(&win.id) {
+                            (*tex_w as f32, *tex_h as f32)
+                        } else {
+                            (win.width as f32, win.height as f32)
+                        };
+                        hdr_shadow_pipeline.update_uniforms(
+                            &self.gpu.queue,
+                            shadow_buffer,
+                            win.x as f32,
+                            win.y as f32,
+                            w,
+                            h,
+                            vw as f32,
+                            vh as f32,
+                            win.corner_radius,
+                            &self.shadow_config,
+                        );
+                        hdr_shadow_pipeline.render(&mut render_pass, shadow_bind);
+                    }
                 }
             }
 

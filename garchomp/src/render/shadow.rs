@@ -69,8 +69,6 @@ pub struct ShadowUniforms {
 pub struct ShadowPipeline {
     pipeline: wgpu::RenderPipeline,
     bind_group_layout: wgpu::BindGroupLayout,
-    uniform_buffer: wgpu::Buffer,
-    bind_group: wgpu::BindGroup,
     vertex_buffer: wgpu::Buffer,
     index_buffer: wgpu::Buffer,
 }
@@ -141,36 +139,6 @@ impl ShadowPipeline {
             cache: None,
         });
 
-        // Create uniform buffer
-        let uniform_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("shadow_uniform_buffer"),
-            contents: bytemuck::cast_slice(&[ShadowUniforms {
-                transform: [0.0, 0.0, 100.0, 100.0],
-                viewport: [1920.0, 1080.0],
-                _pad0: [0.0; 2],
-                color: [0.0, 0.0, 0.0],
-                opacity: 0.5,
-                window_size: [100.0, 100.0],
-                spread: 15.0,
-                blur_radius: 12.0,
-                corner_radius: 0.0,
-                _pad1: 0.0,
-                offset: [0.0, 5.0],
-                _pad2: [0.0; 4],
-            }]),
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-        });
-
-        // Create bind group
-        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("shadow_bind_group"),
-            layout: &bind_group_layout,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: uniform_buffer.as_entire_binding(),
-            }],
-        });
-
         // Create vertex buffer (unit quad)
         let vertices = [
             Vertex {
@@ -207,17 +175,50 @@ impl ShadowPipeline {
         Self {
             pipeline,
             bind_group_layout,
-            uniform_buffer,
-            bind_group,
             vertex_buffer,
             index_buffer,
         }
+    }
+
+    /// Create a uniform buffer for a window's shadow.
+    pub fn create_uniform_buffer(&self, device: &wgpu::Device) -> wgpu::Buffer {
+        device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("shadow_uniform_buffer"),
+            contents: bytemuck::cast_slice(&[ShadowUniforms {
+                transform: [0.0, 0.0, 100.0, 100.0],
+                viewport: [1920.0, 1080.0],
+                _pad0: [0.0; 2],
+                color: [0.0, 0.0, 0.0],
+                opacity: 0.5,
+                window_size: [100.0, 100.0],
+                spread: 15.0,
+                blur_radius: 12.0,
+                corner_radius: 0.0,
+                _pad1: 0.0,
+                offset: [0.0, 5.0],
+                _pad2: [0.0; 4],
+            }]),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        })
+    }
+
+    /// Create a bind group for a window's shadow.
+    pub fn create_bind_group(&self, device: &wgpu::Device, uniform_buffer: &wgpu::Buffer) -> wgpu::BindGroup {
+        device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("shadow_bind_group"),
+            layout: &self.bind_group_layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: uniform_buffer.as_entire_binding(),
+            }],
+        })
     }
 
     /// Update uniforms for a window shadow.
     pub fn update_uniforms(
         &self,
         queue: &wgpu::Queue,
+        uniform_buffer: &wgpu::Buffer,
         window_x: f32,
         window_y: f32,
         window_width: f32,
@@ -251,13 +252,13 @@ impl ShadowPipeline {
             _pad2: [0.0; 4],
         };
 
-        queue.write_buffer(&self.uniform_buffer, 0, bytemuck::cast_slice(&[uniforms]));
+        queue.write_buffer(uniform_buffer, 0, bytemuck::cast_slice(&[uniforms]));
     }
 
     /// Render a shadow.
-    pub fn render<'a>(&'a self, render_pass: &mut wgpu::RenderPass<'a>) {
+    pub fn render<'a>(&'a self, render_pass: &mut wgpu::RenderPass<'a>, bind_group: &'a wgpu::BindGroup) {
         render_pass.set_pipeline(&self.pipeline);
-        render_pass.set_bind_group(0, &self.bind_group, &[]);
+        render_pass.set_bind_group(0, bind_group, &[]);
         render_pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
         render_pass.set_index_buffer(self.index_buffer.slice(..), wgpu::IndexFormat::Uint16);
         render_pass.draw_indexed(0..6, 0, 0..1);
