@@ -293,6 +293,18 @@ fn handle_ipc_request(compositor: &mut compositor::Compositor, request: ipc::Cli
             }
         }
         Request::Status => {
+            let monitors: Vec<garchomp_ipc::MonitorStatus> = compositor.monitors
+                .iter()
+                .map(|m| garchomp_ipc::MonitorStatus {
+                    name: m.name.clone(),
+                    x: m.x,
+                    y: m.y,
+                    width: m.width,
+                    height: m.height,
+                    primary: m.primary,
+                })
+                .collect();
+
             Response::Status(garchomp_ipc::CompositorStatus {
                 version: garchomp_ipc::PROTOCOL_VERSION,
                 window_count: compositor.windows.len(),
@@ -304,6 +316,7 @@ fn handle_ipc_request(compositor: &mut compositor::Compositor, request: ipc::Cli
                     blur_strength: compositor.effects.blur_strength,
                 },
                 connected_to_gar: compositor.is_connected_to_gar(),
+                monitors,
             })
         }
     };

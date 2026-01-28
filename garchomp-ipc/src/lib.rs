@@ -55,6 +55,19 @@ pub struct CompositorStatus {
     pub current_workspace: usize,
     pub effects_enabled: EffectsStatus,
     pub connected_to_gar: bool,
+    #[serde(default)]
+    pub monitors: Vec<MonitorStatus>,
+}
+
+/// Information about a monitor.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MonitorStatus {
+    pub name: String,
+    pub x: i16,
+    pub y: i16,
+    pub width: u16,
+    pub height: u16,
+    pub primary: bool,
 }
 
 /// Status of compositor effects.

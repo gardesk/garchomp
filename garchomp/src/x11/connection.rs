@@ -6,9 +6,27 @@ use thiserror::Error;
 use x11rb::connection::{Connection as X11Connection, RequestConnection};
 use x11rb::protocol::composite::ConnectionExt as CompositeConnectionExt;
 use x11rb::protocol::damage::ConnectionExt as DamageConnectionExt;
+use x11rb::protocol::randr::ConnectionExt as RandrConnectionExt;
 use x11rb::protocol::xfixes::ConnectionExt as XfixesConnectionExt;
 use x11rb::protocol::xproto::{ConnectionExt as XprotoConnectionExt, Screen, Window};
 use x11rb::rust_connection::RustConnection;
+
+/// Information about a monitor/output.
+#[derive(Debug, Clone)]
+pub struct MonitorInfo {
+    /// Monitor name (e.g., "DP-1", "HDMI-0").
+    pub name: String,
+    /// X position in pixels.
+    pub x: i16,
+    /// Y position in pixels.
+    pub y: i16,
+    /// Width in pixels.
+    pub width: u16,
+    /// Height in pixels.
+    pub height: u16,
+    /// Whether this is the primary monitor.
+    pub primary: bool,
+}
 
 #[derive(Error, Debug)]
 pub enum ConnectionError {
@@ -223,5 +241,104 @@ impl Connection {
         ).ok()?.reply().ok()?;
 
         reply.value32().and_then(|mut v| v.next()).filter(|&p| p != 0)
+    }
+
+    /// Query all monitors using RandR.
+    /// Returns a list of active monitors with their geometry.
+    pub fn get_monitors(&self) -> Result<Vec<MonitorInfo>> {
+        // Query RandR version first
+        let randr_version = self.conn.randr_query_version(1, 5)?.reply()?;
+        tracing::debug!(
+            "RandR version: {}.{}",
+            randr_version.major_version,
+            randr_version.minor_version
+        );
+
+        // Get screen resources
+        let resources = self.conn.randr_get_screen_resources(self.root())?.reply()?;
+
+        // Get primary output
+        let primary = self.conn.randr_get_output_primary(self.root())?.reply()?;
+        let primary_output = primary.output;
+
+        let mut monitors = Vec::new();
+
+        // Iterate through all CRTCs to find active outputs
+        for crtc in &resources.crtcs {
+            let crtc_info = match self.conn.randr_get_crtc_info(*crtc, 0)?.reply() {
+                Ok(info) => info,
+                Err(_) => continue,
+            };
+
+            // Skip disabled CRTCs
+            if crtc_info.width == 0 || crtc_info.height == 0 {
+                continue;
+            }
+
+            // Get output name from first connected output
+            for output in &crtc_info.outputs {
+                let output_info = match self.conn.randr_get_output_info(*output, 0)?.reply() {
+                    Ok(info) => info,
+                    Err(_) => continue,
+                };
+
+                // Convert name bytes to string
+                let name = String::from_utf8_lossy(&output_info.name).to_string();
+
+                monitors.push(MonitorInfo {
+                    name,
+                    x: crtc_info.x,
+                    y: crtc_info.y,
+                    width: crtc_info.width,
+                    height: crtc_info.height,
+                    primary: *output == primary_output,
+                });
+
+                // Only take first output per CRTC
+                break;
+            }
+        }
+
+        // Sort by position (left to right, top to bottom)
+        monitors.sort_by(|a, b| {
+            if a.y != b.y {
+                a.y.cmp(&b.y)
+            } else {
+                a.x.cmp(&b.x)
+            }
+        });
+
+        tracing::info!("Found {} monitors", monitors.len());
+        for (i, m) in monitors.iter().enumerate() {
+            tracing::info!(
+                "  Monitor {}: {} {}x{}+{}+{} {}",
+                i, m.name, m.width, m.height, m.x, m.y,
+                if m.primary { "(primary)" } else { "" }
+            );
+        }
+
+        Ok(monitors)
+    }
+
+    /// Find which monitor a point is on.
+    pub fn point_to_monitor(&self, x: i32, y: i32, monitors: &[MonitorInfo]) -> Option<usize> {
+        for (i, m) in monitors.iter().enumerate() {
+            let mx = m.x as i32;
+            let my = m.y as i32;
+            let mw = m.width as i32;
+            let mh = m.height as i32;
+
+            if x >= mx && x < mx + mw && y >= my && y < my + mh {
+                return Some(i);
+            }
+        }
+        None
+    }
+
+    /// Find which monitor a window is primarily on (by center point).
+    pub fn window_to_monitor(&self, x: i16, y: i16, width: u16, height: u16, monitors: &[MonitorInfo]) -> Option<usize> {
+        let center_x = x as i32 + (width as i32 / 2);
+        let center_y = y as i32 + (height as i32 / 2);
+        self.point_to_monitor(center_x, center_y, monitors)
     }
 }

@@ -14,7 +14,7 @@ pub use workspace::{TransitionDirection, WorkspaceState, WorkspaceTransition};
 use crate::config::LuaConfig;
 use crate::ipc::GarConnection;
 use crate::render::{GpuError, HdrConfig, Renderer, WindowRenderInfo};
-use crate::x11::{CompositeExt, Connection};
+use crate::x11::{CompositeExt, Connection, MonitorInfo};
 use garchomp_ipc::GarEvent;
 use std::collections::HashMap;
 use thiserror::Error;
@@ -64,6 +64,8 @@ pub struct Compositor {
     lua_config: Option<LuaConfig>,
     /// Root window background pixmap (wallpaper).
     root_pixmap: Option<u32>,
+    /// Monitor configuration from RandR.
+    pub monitors: Vec<MonitorInfo>,
 }
 
 impl Compositor {
@@ -83,9 +85,9 @@ impl Compositor {
         let width = screen.width_in_pixels as u32;
         let height = screen.height_in_pixels as u32;
 
-        // Initialize GPU renderer
+        // Initialize GPU renderer (vsync will be configured after loading Lua config)
         tracing::info!("Initializing GPU renderer for {}x{} surface", width, height);
-        let renderer = Renderer::new(overlay, width, height).await?;
+        let renderer = Renderer::new(overlay, width, height, crate::render::VSync::default()).await?;
         tracing::info!("GPU renderer initialized");
 
         // Subscribe to events on root window
@@ -134,6 +136,9 @@ impl Compositor {
             tracing::info!("Found root pixmap: {:#x}", pix);
         }
 
+        // Query monitor configuration
+        let monitors = conn.get_monitors().unwrap_or_default();
+
         let mut compositor = Self {
             conn,
             overlay,
@@ -147,10 +152,15 @@ impl Compositor {
             gar,
             lua_config,
             root_pixmap,
+            monitors,
         };
 
         // Get initial active window
         compositor.active_window = compositor.conn.get_active_window();
+
+        // Apply VSync setting from config
+        compositor.renderer.set_vsync(compositor.effects.vsync);
+        tracing::info!("VSync mode: {:?}", compositor.effects.vsync);
 
         // Apply HDR config if enabled
         if let Some(ref lua) = compositor.lua_config {
