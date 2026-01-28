@@ -143,6 +143,9 @@ async fn main() -> Result<()> {
             }
         }
 
+        // Try to load root pixmap on startup if not found initially
+        compositor.try_load_root_pixmap();
+
         // Render if needed
         if compositor.needs_redraw() {
             if let Err(e) = compositor.render() {

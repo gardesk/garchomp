@@ -66,6 +66,8 @@ pub struct Compositor {
     root_pixmap: Option<u32>,
     /// Monitor configuration from RandR.
     pub monitors: Vec<MonitorInfo>,
+    /// Startup retry counter for root pixmap loading.
+    root_pixmap_retry_count: u32,
 }
 
 impl Compositor {
@@ -153,6 +155,7 @@ impl Compositor {
             lua_config,
             root_pixmap,
             monitors,
+            root_pixmap_retry_count: if root_pixmap.is_none() { 10 } else { 0 },
         };
 
         // Get initial active window
@@ -613,10 +616,12 @@ impl Compositor {
             && (event.atom == self.conn.atoms._XROOTPMAP_ID
                 || event.atom == self.conn.atoms.ESETROOT_PMAP_ID)
         {
+            tracing::debug!("Received PropertyNotify for root pixmap");
             let new_pixmap = self.conn.get_root_pixmap();
             if new_pixmap != self.root_pixmap {
                 tracing::info!("Root pixmap changed: {:?} -> {:?}", self.root_pixmap, new_pixmap);
                 self.root_pixmap = new_pixmap;
+                self.root_pixmap_retry_count = 0; // Stop startup retries
                 // Tell renderer about new background
                 self.renderer.set_root_pixmap(new_pixmap);
                 self.needs_redraw = true;
@@ -1077,7 +1082,28 @@ impl Compositor {
 
     /// Check if a redraw is needed.
     pub fn needs_redraw(&self) -> bool {
-        self.needs_redraw
+        self.needs_redraw || self.root_pixmap_retry_count > 0
+    }
+
+    /// Try to load the root pixmap if we haven't found one yet.
+    /// Called during startup to handle race condition with garbg.
+    pub fn try_load_root_pixmap(&mut self) {
+        if self.root_pixmap_retry_count > 0 {
+            self.root_pixmap_retry_count -= 1;
+            let new_pixmap = self.conn.get_root_pixmap();
+            if new_pixmap.is_some() && new_pixmap != self.root_pixmap {
+                tracing::info!(
+                    "Root pixmap found on startup retry: {:?} (retries left: {})",
+                    new_pixmap, self.root_pixmap_retry_count
+                );
+                self.root_pixmap = new_pixmap;
+                self.renderer.set_root_pixmap(new_pixmap);
+                self.root_pixmap_retry_count = 0; // Success, stop retrying
+                self.needs_redraw = true;
+            } else if self.root_pixmap_retry_count == 0 {
+                tracing::debug!("Root pixmap startup retry exhausted, pixmap={:?}", self.root_pixmap);
+            }
+        }
     }
 
     /// Resize the renderer surface.
