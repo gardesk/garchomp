@@ -855,6 +855,10 @@ impl Compositor {
         let mut windows_to_unmap = Vec::new();
 
         for (id, w) in self.windows.iter_mut() {
+            // Check fade-out completion BEFORE cleanup (cleanup removes the animation)
+            if w.animations.fade_out_complete() {
+                windows_to_unmap.push(*id);
+            }
             w.animations.cleanup_completed();
             w.cleanup_lua_animation();
             if w.animations.has_active_animations() {
@@ -862,10 +866,6 @@ impl Compositor {
             }
             if w.has_lua_animation() {
                 has_active_animations = true;
-            }
-            // Mark windows that finished fade-out as unmapped
-            if w.animations.fade_out_complete() {
-                windows_to_unmap.push(*id);
             }
         }
 
