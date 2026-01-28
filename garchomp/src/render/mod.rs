@@ -10,7 +10,7 @@ mod texture;
 mod xlib;
 
 pub use blur::{BlurPipeline, BlurTechnique};
-pub use gpu::{GpuContext, GpuError};
+pub use gpu::{GpuContext, GpuError, VSync};
 pub use hdr::{Colorspace, HdrConfig, HdrRenderTarget, TonemapOperator, TonemapPipeline};
 pub use pipeline::{CompositePipeline, Uniforms, Vertex};
 pub use renderer::{Renderer, WindowRenderData, WindowRenderInfo};

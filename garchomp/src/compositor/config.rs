@@ -1,6 +1,7 @@
 //! Effects configuration for the compositor.
 
 use crate::config::LuaConfig;
+use crate::render::VSync;
 
 /// Configuration for all compositor visual effects.
 #[derive(Debug, Clone)]
@@ -40,6 +41,10 @@ pub struct EffectsConfig {
     pub fade_in_duration: f32,
     /// Fade-out duration in seconds.
     pub fade_out_duration: f32,
+
+    // VSync
+    /// VSync mode for frame presentation.
+    pub vsync: VSync,
 }
 
 impl Default for EffectsConfig {
@@ -67,6 +72,9 @@ impl Default for EffectsConfig {
             fade_enabled: false,
             fade_in_duration: 0.1,
             fade_out_duration: 0.1,
+
+            // VSync (adaptive by default for low latency without tearing)
+            vsync: VSync::Adaptive,
         }
     }
 }
@@ -92,6 +100,8 @@ impl EffectsConfig {
         let shadow_color_r: f32 = lua.get_setting("shadow_color_r").unwrap_or(0.0);
         let shadow_color_g: f32 = lua.get_setting("shadow_color_g").unwrap_or(0.0);
         let shadow_color_b: f32 = lua.get_setting("shadow_color_b").unwrap_or(0.0);
+        let vsync_str: String = lua.get_setting("vsync").unwrap_or("adaptive".to_string());
+        let vsync = VSync::from_str(&vsync_str);
 
         Self {
             blur_enabled,
@@ -107,6 +117,7 @@ impl EffectsConfig {
             fade_enabled,
             fade_in_duration,
             fade_out_duration,
+            vsync,
         }
     }
 

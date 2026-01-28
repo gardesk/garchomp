@@ -3,6 +3,51 @@
 use super::xlib::{XlibDisplay, XlibError, XlibWindowHandle};
 use thiserror::Error;
 
+/// VSync mode for frame presentation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum VSync {
+    /// No vsync - immediate presentation, may tear
+    Off,
+    /// VSync enabled - wait for vertical blank (Fifo)
+    #[default]
+    On,
+    /// Adaptive vsync - mailbox mode (low latency, no tearing)
+    Adaptive,
+}
+
+impl VSync {
+    /// Parse from string (for Lua config).
+    pub fn from_str(s: &str) -> Self {
+        match s.to_lowercase().as_str() {
+            "off" | "false" | "none" | "immediate" => Self::Off,
+            "on" | "true" | "fifo" => Self::On,
+            "adaptive" | "mailbox" => Self::Adaptive,
+            _ => Self::default(),
+        }
+    }
+
+    /// Convert to wgpu PresentMode.
+    fn to_present_mode(self, caps: &wgpu::SurfaceCapabilities) -> wgpu::PresentMode {
+        match self {
+            Self::Off => {
+                if caps.present_modes.contains(&wgpu::PresentMode::Immediate) {
+                    wgpu::PresentMode::Immediate
+                } else {
+                    wgpu::PresentMode::Fifo // Fallback
+                }
+            }
+            Self::On => wgpu::PresentMode::Fifo,
+            Self::Adaptive => {
+                if caps.present_modes.contains(&wgpu::PresentMode::Mailbox) {
+                    wgpu::PresentMode::Mailbox
+                } else {
+                    wgpu::PresentMode::Fifo // Fallback
+                }
+            }
+        }
+    }
+}
+
 #[derive(Error, Debug)]
 pub enum GpuError {
     #[error("Xlib error: {0}")]
@@ -34,11 +79,13 @@ pub struct GpuContext {
     pub surface_config: wgpu::SurfaceConfiguration,
     // Keep Xlib display alive for surface lifetime
     xlib_display: XlibDisplay,
+    // Available present modes for vsync changes
+    available_present_modes: Vec<wgpu::PresentMode>,
 }
 
 impl GpuContext {
     /// Create a new GPU context for the given overlay window.
-    pub async fn new(window: u32, width: u32, height: u32) -> Result<Self> {
+    pub async fn new(window: u32, width: u32, height: u32, vsync: VSync) -> Result<Self> {
         // Open separate Xlib connection for GPU
         let xlib_display = XlibDisplay::open()?;
         let display = xlib_display.display_ptr();
@@ -111,17 +158,11 @@ impl GpuContext {
             surface_caps.alpha_modes[0]
         };
 
-        // Prefer Mailbox (low latency) or Fifo (vsync)
-        let present_mode = if surface_caps
-            .present_modes
-            .contains(&wgpu::PresentMode::Mailbox)
-        {
-            wgpu::PresentMode::Mailbox
-        } else {
-            wgpu::PresentMode::Fifo
-        };
+        // Select present mode based on vsync setting
+        let present_mode = vsync.to_present_mode(&surface_caps);
+        let available_present_modes = surface_caps.present_modes.clone();
 
-        tracing::info!("Present mode: {:?}, alpha: {:?}", present_mode, alpha_mode);
+        tracing::info!("VSync: {:?}, present mode: {:?}, alpha: {:?}", vsync, present_mode, alpha_mode);
 
         let surface_config = wgpu::SurfaceConfiguration {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
@@ -142,7 +183,23 @@ impl GpuContext {
             surface,
             surface_config,
             xlib_display,
+            available_present_modes,
         })
+    }
+
+    /// Set VSync mode at runtime.
+    pub fn set_vsync(&mut self, vsync: VSync) {
+        let caps = wgpu::SurfaceCapabilities {
+            present_modes: self.available_present_modes.clone(),
+            ..Default::default()
+        };
+        let new_mode = vsync.to_present_mode(&caps);
+
+        if new_mode != self.surface_config.present_mode {
+            tracing::info!("Changing VSync to {:?} (present mode: {:?})", vsync, new_mode);
+            self.surface_config.present_mode = new_mode;
+            self.surface.configure(&self.device, &self.surface_config);
+        }
     }
 
     /// Resize the surface.

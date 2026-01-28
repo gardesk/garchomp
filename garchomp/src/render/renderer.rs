@@ -135,8 +135,8 @@ pub struct Renderer {
 
 impl Renderer {
     /// Create a new renderer for the given overlay window.
-    pub async fn new(window: u32, width: u32, height: u32) -> Result<Self, GpuError> {
-        let gpu = GpuContext::new(window, width, height).await?;
+    pub async fn new(window: u32, width: u32, height: u32, vsync: super::VSync) -> Result<Self, GpuError> {
+        let gpu = GpuContext::new(window, width, height, vsync).await?;
 
         // Create the composite pipeline
         let pipeline = CompositePipeline::new(&gpu.device, gpu.format());
@@ -276,6 +276,11 @@ impl Renderer {
         self.gpu.resize(width, height);
         // Invalidate intermediate texture so it gets recreated at new size
         self.intermediate_texture = None;
+    }
+
+    /// Set VSync mode.
+    pub fn set_vsync(&mut self, vsync: super::VSync) {
+        self.gpu.set_vsync(vsync);
     }
 
     /// Set the clear color (background).
