@@ -413,6 +413,9 @@ impl Renderer {
                     }
                     Err(e) => {
                         tracing::warn!("Failed to update texture for window {:#x}: {}", win.id, e);
+                        // Remove stale bind groups so we don't render old/wrong texture data
+                        self.window_bind_groups.remove(&win.id);
+                        self.shadow_bind_groups.remove(&win.id);
                     }
                 }
             } else {

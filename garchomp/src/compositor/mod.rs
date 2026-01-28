@@ -247,11 +247,11 @@ impl Compositor {
         // Check for fullscreen state
         let fullscreen = self.is_window_fullscreen(window);
 
-        // Check for compositor bypass request (_NET_WM_BYPASS_COMPOSITOR)
-        let bypass_compositor = self.conn.wants_bypass(window).unwrap_or(false);
-        if bypass_compositor || fullscreen {
-            tracing::debug!("Unredirecting window {:#x} (fullscreen={}, bypass={})",
-                window, fullscreen, bypass_compositor);
+        // Only unredirect fullscreen windows for direct rendering
+        // Ignore _NET_WM_BYPASS_COMPOSITOR requests as they break compositing
+        // (apps like VSCode/Electron request bypass but we want to composite them)
+        if fullscreen {
+            tracing::debug!("Unredirecting fullscreen window {:#x}", window);
             if let Err(e) = self.conn.unredirect_window(window) {
                 tracing::warn!("Failed to unredirect window: {}", e);
             }

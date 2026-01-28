@@ -3,7 +3,18 @@
 use super::GpuError;
 use std::collections::HashMap;
 use std::ffi::c_void;
-use x11_dl::xlib::{Display, Pixmap, Visual, XImage, Xlib, ZPixmap};
+use x11_dl::xlib::{Display, Pixmap, Visual, XImage, Xlib, ZPixmap, XErrorEvent};
+
+/// X11 error handler that suppresses errors to prevent crashes.
+/// The compositor can handle missing textures gracefully.
+extern "C" fn x11_error_handler(_display: *mut Display, event: *mut XErrorEvent) -> i32 {
+    let error_code = unsafe { (*event).error_code };
+    // Just log and suppress - don't crash
+    if error_code != 0 {
+        tracing::debug!("X11 error suppressed: code={}", error_code);
+    }
+    0
+}
 
 /// Manages textures for compositor windows.
 pub struct TextureManager {
@@ -24,6 +35,11 @@ impl TextureManager {
     /// Create a new texture manager.
     pub fn new(display: *mut c_void) -> Result<Self, GpuError> {
         let xlib = Xlib::open().map_err(|_| GpuError::Xlib(super::xlib::XlibError::LoadXlib))?;
+
+        // Install X11 error handler to prevent crashes on invalid pixmaps
+        unsafe {
+            (xlib.XSetErrorHandler)(Some(x11_error_handler));
+        }
 
         Ok(Self {
             xlib,
@@ -158,7 +174,6 @@ impl TextureManager {
         };
 
         if status == 0 {
-            // Failed
             (0, 0, 24)
         } else {
             (width, height, depth as u8)
@@ -170,9 +185,6 @@ impl TextureManager {
         // Get the default visual for depth/color info
         let screen = unsafe { (self.xlib.XDefaultScreen)(self.display) };
         let visual = unsafe { (self.xlib.XDefaultVisual)(self.display, screen) };
-
-        // Sync display to ensure pixmap is ready
-        unsafe { (self.xlib.XSync)(self.display, 0) };
 
         // Get the image data from the pixmap
         let image = unsafe {
