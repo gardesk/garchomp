@@ -6,8 +6,9 @@ mod window;
 mod workspace;
 
 pub use animation::{Animation, Easing, WindowAnimations};
+use crate::config::AnimationTrigger;
 pub use config::EffectsConfig;
-pub use window::{TrackedWindow, WindowType};
+pub use window::{LuaAnimation, TrackedWindow, WindowRuleOverrides, WindowType};
 pub use workspace::{TransitionDirection, WorkspaceState, WorkspaceTransition};
 
 use crate::config::LuaConfig;
@@ -154,6 +155,11 @@ impl Compositor {
         // Scan existing windows
         compositor.scan_windows()?;
 
+        // Sync current workspace from X11
+        let current_desktop = compositor.get_current_desktop();
+        compositor.workspaces.set_current(current_desktop);
+        tracing::info!("Current workspace: {}", current_desktop);
+
         Ok(compositor)
     }
 
@@ -216,6 +222,37 @@ impl Compositor {
         // Get initial opacity
         let opacity = self.get_window_opacity(window);
 
+        // Check for fullscreen state
+        let fullscreen = self.is_window_fullscreen(window);
+
+        // Check for compositor bypass request (_NET_WM_BYPASS_COMPOSITOR)
+        let bypass_compositor = self.conn.wants_bypass(window).unwrap_or(false);
+        if bypass_compositor || fullscreen {
+            tracing::debug!("Unredirecting window {:#x} (fullscreen={}, bypass={})",
+                window, fullscreen, bypass_compositor);
+            if let Err(e) = self.conn.unredirect_window(window) {
+                tracing::warn!("Failed to unredirect window: {}", e);
+            }
+        }
+
+        // Get window class for rule matching
+        let (wm_class, wm_instance) = self.get_window_class(window);
+        let window_type_str = window_type_to_string(window_type);
+
+        // Find matching rules and build overrides
+        let rule_overrides = if let Some(ref lua_config) = self.lua_config {
+            let rules = lua_config.find_rules(
+                wm_class.as_deref(),
+                wm_instance.as_deref(),
+                None, // TODO: Get window title
+                Some(&window_type_str),
+                fullscreen,
+            );
+            build_rule_overrides(&rules)
+        } else {
+            WindowRuleOverrides::default()
+        };
+
         // Create animation state, starting fade-in if enabled
         let mut animations = WindowAnimations::new();
         if self.effects.fade_enabled {
@@ -237,9 +274,12 @@ impl Compositor {
             override_redirect: attrs.override_redirect,
             window_type,
             opacity,
-            corner_radius: 12.0, // Default corner radius (TODO: make configurable)
+            corner_radius: self.effects.corner_radius,
             damaged: true,
             animations,
+            rule_overrides,
+            fullscreen,
+            lua_animation: None,
         };
 
         tracing::debug!(
@@ -253,7 +293,62 @@ impl Compositor {
         );
 
         self.windows.insert(window, tracked);
+
+        // Assign window to its workspace from _NET_WM_DESKTOP
+        // Only for non-override-redirect windows (managed windows)
+        if !attrs.override_redirect {
+            if let Some(desktop) = self.get_window_desktop(window) {
+                self.workspaces.assign_window(window, desktop);
+                tracing::debug!("Window {:#x} assigned to workspace {}", window, desktop);
+            }
+        }
+
+        // Start window_open animation if configured
+        self.start_lua_animation(window, crate::config::AnimationTrigger::WindowOpen);
+
         Ok(())
+    }
+
+    /// Start a Lua animation for a window if one is configured.
+    fn start_lua_animation(&mut self, window: Window, trigger: AnimationTrigger) {
+        // Check if we have an animation configured for this trigger
+        if let Some(ref lua_config) = self.lua_config {
+            if let Some(anim) = lua_config.get_animation(trigger) {
+                let duration = std::time::Duration::from_secs_f32(anim.duration);
+                let easing = Easing::from_name(&anim.curve);
+
+                if let Some(tracked) = self.windows.get_mut(&window) {
+                    tracked.start_lua_animation(trigger, duration, easing);
+                    tracing::debug!(
+                        "Started {:?} animation for window {:#x} ({}s, {:?})",
+                        trigger, window, anim.duration, easing
+                    );
+                }
+            }
+        }
+    }
+
+    /// Update all active Lua animations by calling their callbacks.
+    fn update_lua_animations(&mut self) {
+        // Collect window IDs with active Lua animations
+        let lua_animated: Vec<(Window, AnimationTrigger, f32, std::sync::Arc<std::sync::Mutex<crate::config::WindowTransform>>)> = self
+            .windows
+            .iter()
+            .filter_map(|(id, w)| {
+                w.lua_animation.as_ref().filter(|a| !a.is_complete()).map(|a| {
+                    (*id, a.trigger, a.eased_progress(), a.transform_handle())
+                })
+            })
+            .collect();
+
+        // Call Lua callbacks for each animation
+        if let Some(ref lua_config) = self.lua_config {
+            for (window_id, trigger, t, transform) in lua_animated {
+                if let Err(e) = lua_config.call_animation(trigger, t, &transform, window_id) {
+                    tracing::warn!("Lua animation callback error: {}", e);
+                }
+            }
+        }
     }
 
     /// Stop tracking a window.
@@ -427,6 +522,25 @@ impl Compositor {
             }
         }
 
+        // Check for current desktop change (on root window)
+        if event.window == self.conn.root() && event.atom == self.conn.atoms._NET_CURRENT_DESKTOP {
+            let new_desktop = self.get_current_desktop();
+            if new_desktop != self.workspaces.current {
+                tracing::info!("Workspace changed: {} -> {}", self.workspaces.current, new_desktop);
+                self.workspaces.set_current(new_desktop);
+                self.needs_redraw = true;
+            }
+        }
+
+        // Check for window desktop/workspace change
+        if event.atom == self.conn.atoms._NET_WM_DESKTOP {
+            if let Some(desktop) = self.get_window_desktop(event.window) {
+                self.workspaces.assign_window(event.window, desktop);
+                tracing::debug!("Window {:#x} moved to workspace {}", event.window, desktop);
+                self.needs_redraw = true;
+            }
+        }
+
         Ok(())
     }
 
@@ -493,6 +607,115 @@ impl Compositor {
         self.active_window == Some(window)
     }
 
+    /// Check if a window is fullscreen.
+    fn is_window_fullscreen(&self, window: Window) -> bool {
+        let cookie = match self.conn.conn.get_property(
+            false,
+            window,
+            self.conn.atoms._NET_WM_STATE,
+            AtomEnum::ATOM,
+            0,
+            64,
+        ) {
+            Ok(c) => c,
+            Err(_) => return false,
+        };
+
+        match cookie.reply() {
+            Ok(reply) => {
+                if let Some(atoms) = reply.value32() {
+                    for atom in atoms {
+                        if atom == self.conn.atoms._NET_WM_STATE_FULLSCREEN {
+                            return true;
+                        }
+                    }
+                }
+                false
+            }
+            Err(_) => false,
+        }
+    }
+
+    /// Get the workspace/desktop for a window from _NET_WM_DESKTOP.
+    fn get_window_desktop(&self, window: Window) -> Option<usize> {
+        let cookie = match self.conn.conn.get_property(
+            false,
+            window,
+            self.conn.atoms._NET_WM_DESKTOP,
+            AtomEnum::CARDINAL,
+            0,
+            1,
+        ) {
+            Ok(c) => c,
+            Err(_) => return None,
+        };
+
+        match cookie.reply() {
+            Ok(reply) => {
+                reply.value32().and_then(|mut v| v.next()).map(|d| d as usize)
+            }
+            Err(_) => None,
+        }
+    }
+
+    /// Get the current desktop from _NET_CURRENT_DESKTOP.
+    fn get_current_desktop(&self) -> usize {
+        let cookie = match self.conn.conn.get_property(
+            false,
+            self.conn.root(),
+            self.conn.atoms._NET_CURRENT_DESKTOP,
+            AtomEnum::CARDINAL,
+            0,
+            1,
+        ) {
+            Ok(c) => c,
+            Err(_) => return 0,
+        };
+
+        match cookie.reply() {
+            Ok(reply) => {
+                reply.value32().and_then(|mut v| v.next()).map(|d| d as usize).unwrap_or(0)
+            }
+            Err(_) => 0,
+        }
+    }
+
+    /// Get WM_CLASS (class, instance) for a window.
+    fn get_window_class(&self, window: Window) -> (Option<String>, Option<String>) {
+        let cookie = match self.conn.conn.get_property(
+            false,
+            window,
+            AtomEnum::WM_CLASS,
+            AtomEnum::STRING,
+            0,
+            256,
+        ) {
+            Ok(c) => c,
+            Err(_) => return (None, None),
+        };
+
+        match cookie.reply() {
+            Ok(reply) => {
+                let value = reply.value;
+                if value.is_empty() {
+                    return (None, None);
+                }
+                // WM_CLASS format: "instance\0class\0"
+                let parts: Vec<&[u8]> = value.split(|&b| b == 0).collect();
+                let instance = parts.first()
+                    .filter(|p| !p.is_empty())
+                    .and_then(|p| std::str::from_utf8(p).ok())
+                    .map(String::from);
+                let class = parts.get(1)
+                    .filter(|p| !p.is_empty())
+                    .and_then(|p| std::str::from_utf8(p).ok())
+                    .map(String::from);
+                (class, instance)
+            }
+            Err(_) => (None, None),
+        }
+    }
+
     /// Render a frame if needed.
     pub fn render(&mut self) -> Result<()> {
         if !self.needs_redraw {
@@ -505,7 +728,11 @@ impl Compositor {
 
         for (id, w) in self.windows.iter_mut() {
             w.animations.cleanup_completed();
+            w.cleanup_lua_animation();
             if w.animations.has_active_animations() {
+                has_active_animations = true;
+            }
+            if w.has_lua_animation() {
                 has_active_animations = true;
             }
             // Mark windows that finished fade-out as unmapped
@@ -514,12 +741,20 @@ impl Compositor {
             }
         }
 
+        // Call Lua animation callbacks for active animations
+        self.update_lua_animations();
+
         // Unmap windows that finished fading out
         for id in windows_to_unmap {
             if let Some(w) = self.windows.get_mut(&id) {
                 w.mapped = false;
                 w.animations.opacity = None;
             }
+        }
+
+        // Update workspace transitions
+        if self.workspaces.update_transition() {
+            has_active_animations = true;
         }
 
         // Get proper stacking order from WM (bottom to top)
@@ -530,14 +765,36 @@ impl Compositor {
         for window_id in stacking_order {
             if let Some(w) = self.windows.get(&window_id) {
                 if w.mapped && w.pixmap.is_some() {
+                    // Check workspace visibility - only render windows on current workspace,
+                    // windows in transition, or windows not assigned to any workspace (docks, etc.)
+                    let window_ws = self.workspaces.get_window_workspace(w.id);
+                    let should_render = match window_ws {
+                        None => true, // Not tracked by workspace (override-redirect, docks)
+                        Some(ws) => {
+                            ws == self.workspaces.current ||
+                            self.workspaces.transition.as_ref().map_or(false, |t| {
+                                ws == t.from || ws == t.to
+                            })
+                        }
+                    };
+
+                    if !should_render {
+                        continue;
+                    }
+
                     let focused = self.is_window_focused(w.id);
-                    let base_opacity = self.effects.effective_opacity(w.opacity, focused);
-                    // Apply animation opacity multiplier
-                    let opacity = base_opacity * w.animations.opacity_multiplier();
-                    let corner_radius = if w.should_have_corners() {
-                        self.effects.corner_radius
+                    // Get Lua animation transform
+                    let lua_transform = w.lua_transform();
+                    // Get effective opacity (rule override > fullscreen > focus-based > Lua)
+                    let base_opacity = w.effective_opacity()
+                        .min(self.effects.effective_opacity(w.opacity, focused));
+                    // Apply animation opacity multiplier and Lua transform opacity
+                    let opacity = base_opacity * w.animations.opacity_multiplier() * lua_transform.opacity;
+                    // Get effective corner radius (rule override > fullscreen > window type)
+                    let corner_radius = if lua_transform.corner_radius > 0.0 {
+                        lua_transform.corner_radius
                     } else {
-                        0.0
+                        w.effective_corner_radius()
                     };
 
                     windows.push(WindowRenderInfo {
@@ -552,6 +809,8 @@ impl Compositor {
                         shadow_enabled: w.should_have_shadow() && self.effects.shadows_active(),
                         blur_behind: w.should_have_blur() && self.effects.blur_active(),
                         focused,
+                        scale: lua_transform.scale,
+                        offset: lua_transform.offset,
                     });
                 }
             }
@@ -561,13 +820,35 @@ impl Compositor {
         // (e.g., override-redirect windows not managed by WM)
         for w in self.windows.values() {
             if w.mapped && w.pixmap.is_some() && !windows.iter().any(|wi| wi.id == w.id) {
+                // Check workspace visibility - only render windows on current workspace,
+                // windows in transition, or windows not assigned to any workspace (docks, etc.)
+                let window_ws = self.workspaces.get_window_workspace(w.id);
+                let should_render = match window_ws {
+                    None => true, // Not tracked by workspace (override-redirect, docks)
+                    Some(ws) => {
+                        ws == self.workspaces.current ||
+                        self.workspaces.transition.as_ref().map_or(false, |t| {
+                            ws == t.from || ws == t.to
+                        })
+                    }
+                };
+
+                if !should_render {
+                    continue;
+                }
+
                 let focused = self.is_window_focused(w.id);
-                let base_opacity = self.effects.effective_opacity(w.opacity, focused);
-                let opacity = base_opacity * w.animations.opacity_multiplier();
-                let corner_radius = if w.should_have_corners() {
-                    self.effects.corner_radius
+                // Get Lua animation transform
+                let lua_transform = w.lua_transform();
+                // Get effective opacity (rule override > fullscreen > focus-based > Lua)
+                let base_opacity = w.effective_opacity()
+                    .min(self.effects.effective_opacity(w.opacity, focused));
+                let opacity = base_opacity * w.animations.opacity_multiplier() * lua_transform.opacity;
+                // Get effective corner radius (rule override > fullscreen > window type)
+                let corner_radius = if lua_transform.corner_radius > 0.0 {
+                    lua_transform.corner_radius
                 } else {
-                    0.0
+                    w.effective_corner_radius()
                 };
 
                 windows.push(WindowRenderInfo {
@@ -582,6 +863,8 @@ impl Compositor {
                     shadow_enabled: w.should_have_shadow() && self.effects.shadows_active(),
                     blur_behind: w.should_have_blur() && self.effects.blur_active(),
                     focused,
+                    scale: lua_transform.scale,
+                    offset: lua_transform.offset,
                 });
             }
         }
@@ -832,4 +1115,45 @@ impl Drop for Compositor {
     fn drop(&mut self) {
         let _ = self.shutdown();
     }
+}
+
+/// Convert WindowType enum to string for rule matching.
+fn window_type_to_string(wtype: WindowType) -> String {
+    match wtype {
+        WindowType::Normal => "normal".to_string(),
+        WindowType::Desktop => "desktop".to_string(),
+        WindowType::Dock => "dock".to_string(),
+        WindowType::Toolbar => "toolbar".to_string(),
+        WindowType::Menu => "menu".to_string(),
+        WindowType::Utility => "utility".to_string(),
+        WindowType::Splash => "splash".to_string(),
+        WindowType::Dialog => "dialog".to_string(),
+        WindowType::DropdownMenu => "dropdown_menu".to_string(),
+        WindowType::PopupMenu => "popup_menu".to_string(),
+        WindowType::Tooltip => "tooltip".to_string(),
+        WindowType::Notification => "notification".to_string(),
+        WindowType::Combo => "combo".to_string(),
+        WindowType::Dnd => "dnd".to_string(),
+    }
+}
+
+/// Build WindowRuleOverrides from a list of matching rules.
+/// Later rules override earlier ones.
+fn build_rule_overrides(rules: &[&crate::config::WindowRule]) -> WindowRuleOverrides {
+    let mut overrides = WindowRuleOverrides::default();
+    for rule in rules {
+        if let Some(shadow) = rule.shadow {
+            overrides.shadow = Some(shadow);
+        }
+        if let Some(blur) = rule.blur_behind {
+            overrides.blur_behind = Some(blur);
+        }
+        if let Some(opacity) = rule.opacity {
+            overrides.opacity = Some(opacity);
+        }
+        if let Some(corner_radius) = rule.corner_radius {
+            overrides.corner_radius = Some(corner_radius);
+        }
+    }
+    overrides
 }

@@ -49,6 +49,11 @@ atom_manager! {
         _NET_CLIENT_LIST,
         _NET_CLIENT_LIST_STACKING,
 
+        // EWMH - Desktop/Workspace
+        _NET_WM_DESKTOP,
+        _NET_CURRENT_DESKTOP,
+        _NET_NUMBER_OF_DESKTOPS,
+
         // Compositor bypass
         _NET_WM_BYPASS_COMPOSITOR,
 

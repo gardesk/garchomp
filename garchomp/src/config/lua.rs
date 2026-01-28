@@ -43,11 +43,19 @@ pub struct WindowMatch {
     pub instance: Option<String>,
     pub title: Option<String>,
     pub window_type: Option<String>,
+    pub fullscreen: Option<bool>,
 }
 
 impl WindowMatch {
     /// Check if this match applies to a window with the given properties.
-    pub fn matches(&self, class: Option<&str>, instance: Option<&str>, title: Option<&str>, wtype: Option<&str>) -> bool {
+    pub fn matches(
+        &self,
+        class: Option<&str>,
+        instance: Option<&str>,
+        title: Option<&str>,
+        wtype: Option<&str>,
+        fullscreen: bool,
+    ) -> bool {
         if let Some(ref c) = self.class {
             if class != Some(c.as_str()) {
                 return false;
@@ -69,6 +77,11 @@ impl WindowMatch {
         }
         if let Some(ref wt) = self.window_type {
             if wtype != Some(wt.as_str()) {
+                return false;
+            }
+        }
+        if let Some(fs) = self.fullscreen {
+            if fullscreen != fs {
                 return false;
             }
         }
@@ -372,7 +385,10 @@ impl LuaConfig {
                 class: matcher_table.get("class").ok(),
                 instance: matcher_table.get("instance").ok(),
                 title: matcher_table.get("title").ok(),
-                window_type: matcher_table.get("type").ok(),
+                // Support both "type" and "window_type" for consistency
+                window_type: matcher_table.get("window_type").ok()
+                    .or_else(|| matcher_table.get("type").ok()),
+                fullscreen: matcher_table.get("fullscreen").ok(),
             };
 
             let rule = WindowRule {
@@ -397,10 +413,17 @@ impl LuaConfig {
     }
 
     /// Find matching rules for a window.
-    pub fn find_rules(&self, class: Option<&str>, instance: Option<&str>, title: Option<&str>, wtype: Option<&str>) -> Vec<&WindowRule> {
+    pub fn find_rules(
+        &self,
+        class: Option<&str>,
+        instance: Option<&str>,
+        title: Option<&str>,
+        wtype: Option<&str>,
+        fullscreen: bool,
+    ) -> Vec<&WindowRule> {
         self.rules
             .iter()
-            .filter(|r| r.matcher.matches(class, instance, title, wtype))
+            .filter(|r| r.matcher.matches(class, instance, title, wtype, fullscreen))
             .collect()
     }
 
