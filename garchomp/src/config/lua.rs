@@ -90,7 +90,6 @@ impl WindowMatch {
 }
 
 /// Window rule configuration.
-#[derive(Debug, Clone)]
 pub struct WindowRule {
     pub matcher: WindowMatch,
     pub blur_behind: Option<bool>,
@@ -98,17 +97,23 @@ pub struct WindowRule {
     pub opacity: Option<f32>,
     pub corner_radius: Option<f32>,
     /// Animation override for window_open trigger.
-    pub open_animation: Option<AnimationConfig>,
+    pub open_animation: Option<RuleAnimation>,
     /// Animation override for window_close trigger.
-    pub close_animation: Option<AnimationConfig>,
+    pub close_animation: Option<RuleAnimation>,
 }
 
-/// Animation configuration from Lua.
+/// Animation configuration from Lua (without callback - used for simple config).
 #[derive(Debug, Clone)]
 pub struct AnimationConfig {
     pub duration: f32,
     pub curve: String,
-    // Note: callback_key is stored in RegisteredAnimation, not here
+}
+
+/// Animation config with callback for per-window rule overrides.
+pub struct RuleAnimation {
+    pub duration: f32,
+    pub curve: String,
+    pub callback_key: RegistryKey,
 }
 
 /// Registered animation callback.
@@ -391,14 +396,18 @@ impl LuaConfig {
                 fullscreen: matcher_table.get("fullscreen").ok(),
             };
 
+            // Parse animation overrides
+            let open_animation = self.parse_rule_animation(&config_table, "open_animation")?;
+            let close_animation = self.parse_rule_animation(&config_table, "close_animation")?;
+
             let rule = WindowRule {
                 matcher,
                 blur_behind: config_table.get("blur_behind").ok(),
                 shadow: config_table.get("shadow").ok(),
                 opacity: config_table.get("opacity").ok(),
                 corner_radius: config_table.get("corner_radius").ok(),
-                open_animation: None, // TODO: parse animation overrides
-                close_animation: None,
+                open_animation,
+                close_animation,
             };
 
             self.rules.push(rule);
@@ -444,6 +453,46 @@ impl LuaConfig {
             callback.call::<()>((t, proxy))?;
         }
 
+        Ok(())
+    }
+
+    /// Parse a rule animation from a config table.
+    fn parse_rule_animation(&self, config_table: &Table, key: &str) -> LuaResult<Option<RuleAnimation>> {
+        let anim_table: Option<Table> = config_table.get(key).ok();
+
+        if let Some(anim) = anim_table {
+            let duration: f32 = anim.get("duration").unwrap_or(0.2);
+            let curve: String = anim.get("curve").unwrap_or_else(|_| "ease-out".to_string());
+
+            // Get the animate callback
+            let callback: Option<Function> = anim.get("animate").ok();
+
+            if let Some(cb) = callback {
+                // Store callback in registry
+                let callback_key = self.lua.create_registry_value(cb)?;
+
+                return Ok(Some(RuleAnimation {
+                    duration,
+                    curve,
+                    callback_key,
+                }));
+            }
+        }
+
+        Ok(None)
+    }
+
+    /// Call a rule animation callback.
+    pub fn call_rule_animation(
+        &self,
+        animation: &RuleAnimation,
+        t: f32,
+        transform: &Arc<Mutex<WindowTransform>>,
+        window_id: u32,
+    ) -> LuaResult<()> {
+        let callback: Function = self.lua.registry_value(&animation.callback_key)?;
+        let proxy = super::WindowAnimationProxy::new(window_id, Arc::clone(transform));
+        callback.call::<()>((t, proxy))?;
         Ok(())
     }
 
