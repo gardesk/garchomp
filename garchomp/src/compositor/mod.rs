@@ -812,9 +812,12 @@ impl Compositor {
                     let focused = self.is_window_focused(w.id);
                     // Get Lua animation transform
                     let lua_transform = w.lua_transform();
-                    // Get effective opacity (rule override > fullscreen > focus-based > Lua)
-                    let base_opacity = w.effective_opacity()
-                        .min(self.effects.effective_opacity(w.opacity, focused));
+                    // Get effective opacity: rule override takes priority over focus-based
+                    let base_opacity = if w.rule_overrides.opacity.is_some() || w.fullscreen {
+                        w.effective_opacity()
+                    } else {
+                        self.effects.effective_opacity(w.opacity, focused)
+                    };
                     // Apply animation opacity multiplier and Lua transform opacity
                     let opacity = base_opacity * w.animations.opacity_multiplier() * lua_transform.opacity;
                     // Get effective corner radius (rule override > fullscreen > window type)
@@ -867,9 +870,12 @@ impl Compositor {
                 let focused = self.is_window_focused(w.id);
                 // Get Lua animation transform
                 let lua_transform = w.lua_transform();
-                // Get effective opacity (rule override > fullscreen > focus-based > Lua)
-                let base_opacity = w.effective_opacity()
-                    .min(self.effects.effective_opacity(w.opacity, focused));
+                // Get effective opacity: rule override takes priority over focus-based
+                let base_opacity = if w.rule_overrides.opacity.is_some() || w.fullscreen {
+                    w.effective_opacity()
+                } else {
+                    self.effects.effective_opacity(w.opacity, focused)
+                };
                 let opacity = base_opacity * w.animations.opacity_multiplier() * lua_transform.opacity;
                 // Get effective corner radius (rule override > fullscreen > window type)
                 let corner_radius = if lua_transform.corner_radius > 0.0 {
