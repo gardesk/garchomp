@@ -1,0 +1,16 @@
+[Unit]
+Description=garchomp X11 compositor
+Documentation=https://gar.dev
+After=graphical-session.target
+PartOf=graphical-session.target
+Conflicts=picom.service
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/garchomp
+Restart=on-failure
+RestartSec=3
+Environment=DISPLAY=:0
+
+[Install]
+WantedBy=graphical-session.target
