@@ -127,6 +127,10 @@ pub struct Renderer {
     hdr_shadow_pipeline: Option<ShadowPipeline>,
     // Sampler for tonemapping
     linear_sampler: wgpu::Sampler,
+    // Root pixmap (wallpaper) - bind group, uniform buffer, width, height
+    root_pixmap_data: Option<(wgpu::BindGroup, wgpu::Buffer, u32, u32)>,
+    // Current root pixmap ID
+    root_pixmap_id: Option<u32>,
 }
 
 impl Renderer {
@@ -186,6 +190,8 @@ impl Renderer {
             hdr_pipeline: None,
             hdr_shadow_pipeline: None,
             linear_sampler,
+            root_pixmap_data: None,
+            root_pixmap_id: None,
         })
     }
 
@@ -275,6 +281,44 @@ impl Renderer {
     /// Set the clear color (background).
     pub fn set_clear_color(&mut self, r: f64, g: f64, b: f64, a: f64) {
         self.clear_color = Color { r, g, b, a };
+    }
+
+    /// Set the root pixmap (wallpaper background).
+    pub fn set_root_pixmap(&mut self, pixmap: Option<u32>) {
+        if pixmap == self.root_pixmap_id {
+            return; // No change
+        }
+
+        self.root_pixmap_id = pixmap;
+
+        if let Some(pix) = pixmap {
+            // Get screen dimensions for the root pixmap
+            let (width, height) = self.gpu.dimensions();
+
+            // Try to convert the pixmap to a texture
+            match self.texture_manager.update_texture(
+                &self.gpu.device,
+                &self.gpu.queue,
+                0xFFFFFFFF, // Special ID for root pixmap
+                pix as u64,
+                width,
+                height,
+            ) {
+                Ok(tex) => {
+                    let uniform_buffer = self.pipeline.create_uniform_buffer(&self.gpu.device);
+                    let bind_group = self.pipeline.create_bind_group(&self.gpu.device, &tex.view, &uniform_buffer);
+                    self.root_pixmap_data = Some((bind_group, uniform_buffer, tex.width, tex.height));
+                    tracing::info!("Root pixmap texture created: {}x{}", tex.width, tex.height);
+                }
+                Err(e) => {
+                    tracing::warn!("Failed to create root pixmap texture: {}", e);
+                    self.root_pixmap_data = None;
+                }
+            }
+        } else {
+            self.root_pixmap_data = None;
+            self.texture_manager.remove_texture(0xFFFFFFFF);
+        }
     }
 
     /// Render a frame with the test texture to validate the pipeline.
@@ -413,6 +457,23 @@ impl Renderer {
 
             let (vw, vh) = self.gpu.dimensions();
 
+            // Render root pixmap (wallpaper) as background
+            if let Some((ref bind_group, ref uniform_buffer, tex_w, tex_h)) = self.root_pixmap_data {
+                self.pipeline.update_uniforms(
+                    &self.gpu.queue,
+                    uniform_buffer,
+                    0.0,
+                    0.0,
+                    tex_w as f32,
+                    tex_h as f32,
+                    vw as f32,
+                    vh as f32,
+                    1.0, // Fully opaque
+                    0.0, // No corner radius
+                );
+                self.pipeline.render(&mut render_pass, bind_group);
+            }
+
             // First pass: render shadows for all windows (back to front)
             for win in windows {
                 if win.shadow_enabled {
@@ -525,6 +586,23 @@ impl Renderer {
                 timestamp_writes: None,
                 occlusion_query_set: None,
             });
+
+            // Render root pixmap (wallpaper) as background
+            if let Some((ref bind_group, ref uniform_buffer, tex_w, tex_h)) = self.root_pixmap_data {
+                self.pipeline.update_uniforms(
+                    &self.gpu.queue,
+                    uniform_buffer,
+                    0.0,
+                    0.0,
+                    tex_w as f32,
+                    tex_h as f32,
+                    vw as f32,
+                    vh as f32,
+                    1.0,
+                    0.0,
+                );
+                self.pipeline.render(&mut render_pass, bind_group);
+            }
 
             // Render shadows for all windows
             for win in windows {
@@ -849,6 +927,15 @@ impl Renderer {
             hdr_shadow_bind_groups.insert(*id, (shadow_bind, shadow_buffer));
         }
 
+        // Create HDR bind group for root pixmap if available
+        let hdr_root_pixmap = if let Some(tex) = self.texture_manager.get_texture(0xFFFFFFFF) {
+            let uniform_buffer = hdr_pipeline.create_uniform_buffer(&self.gpu.device);
+            let bind_group = hdr_pipeline.create_bind_group(&self.gpu.device, &tex.view, &uniform_buffer);
+            Some((bind_group, uniform_buffer, tex.width, tex.height))
+        } else {
+            None
+        };
+
         let frame = self.gpu.begin_frame()?;
         let surface_view = frame.texture.create_view(&wgpu::TextureViewDescriptor::default());
 
@@ -878,6 +965,23 @@ impl Renderer {
                 timestamp_writes: None,
                 occlusion_query_set: None,
             });
+
+            // Render root pixmap (wallpaper) as background
+            if let Some((ref bind_group, ref uniform_buffer, tex_w, tex_h)) = hdr_root_pixmap {
+                hdr_pipeline.update_uniforms(
+                    &self.gpu.queue,
+                    uniform_buffer,
+                    0.0,
+                    0.0,
+                    tex_w as f32,
+                    tex_h as f32,
+                    vw as f32,
+                    vh as f32,
+                    1.0,
+                    0.0,
+                );
+                hdr_pipeline.render(&mut render_pass, bind_group);
+            }
 
             // Render shadows using HDR shadow pipeline
             for win in windows {

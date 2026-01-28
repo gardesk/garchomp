@@ -62,6 +62,8 @@ pub struct Compositor {
     pub gar: GarConnection,
     /// Lua configuration (for reloading and animation callbacks).
     lua_config: Option<LuaConfig>,
+    /// Root window background pixmap (wallpaper).
+    root_pixmap: Option<u32>,
 }
 
 impl Compositor {
@@ -126,6 +128,12 @@ impl Compositor {
             }
         };
 
+        // Get initial root pixmap (wallpaper)
+        let root_pixmap = conn.get_root_pixmap();
+        if let Some(pix) = root_pixmap {
+            tracing::info!("Found root pixmap: {:#x}", pix);
+        }
+
         let mut compositor = Self {
             conn,
             overlay,
@@ -138,6 +146,7 @@ impl Compositor {
             workspaces: WorkspaceState::new(),
             gar,
             lua_config,
+            root_pixmap,
         };
 
         // Get initial active window
@@ -151,6 +160,9 @@ impl Compositor {
                 compositor.renderer.enable_hdr(hdr_config);
             }
         }
+
+        // Set initial root pixmap in renderer
+        compositor.renderer.set_root_pixmap(compositor.root_pixmap);
 
         // Scan existing windows
         compositor.scan_windows()?;
@@ -537,6 +549,21 @@ impl Compositor {
             if let Some(desktop) = self.get_window_desktop(event.window) {
                 self.workspaces.assign_window(event.window, desktop);
                 tracing::debug!("Window {:#x} moved to workspace {}", event.window, desktop);
+                self.needs_redraw = true;
+            }
+        }
+
+        // Check for root pixmap change (wallpaper update)
+        if event.window == self.conn.root()
+            && (event.atom == self.conn.atoms._XROOTPMAP_ID
+                || event.atom == self.conn.atoms.ESETROOT_PMAP_ID)
+        {
+            let new_pixmap = self.conn.get_root_pixmap();
+            if new_pixmap != self.root_pixmap {
+                tracing::info!("Root pixmap changed: {:?} -> {:?}", self.root_pixmap, new_pixmap);
+                self.root_pixmap = new_pixmap;
+                // Tell renderer about new background
+                self.renderer.set_root_pixmap(new_pixmap);
                 self.needs_redraw = true;
             }
         }

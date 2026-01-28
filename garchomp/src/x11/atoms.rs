@@ -60,6 +60,10 @@ atom_manager! {
         // Opacity
         _NET_WM_WINDOW_OPACITY,
 
+        // Root pixmap (wallpaper)
+        _XROOTPMAP_ID,
+        ESETROOT_PMAP_ID,
+
         // Compositor-specific
         _GARCHOMP_COLORSPACE,
         _GARCHOMP_MAX_LUMINANCE,

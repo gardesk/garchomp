@@ -190,4 +190,38 @@ impl Connection {
 
         reply.value32().and_then(|mut v| v.next())
     }
+
+    /// Get the root window background pixmap (set by wallpaper daemons).
+    /// Checks _XROOTPMAP_ID first, then falls back to ESETROOT_PMAP_ID.
+    pub fn get_root_pixmap(&self) -> Option<u32> {
+        use x11rb::protocol::xproto::AtomEnum;
+
+        // Try _XROOTPMAP_ID first (more common)
+        let reply = self.conn.get_property(
+            false,
+            self.root(),
+            self.atoms._XROOTPMAP_ID,
+            AtomEnum::PIXMAP,
+            0,
+            1,
+        ).ok()?.reply().ok()?;
+
+        if let Some(pixmap) = reply.value32().and_then(|mut v| v.next()) {
+            if pixmap != 0 {
+                return Some(pixmap);
+            }
+        }
+
+        // Fallback to ESETROOT_PMAP_ID
+        let reply = self.conn.get_property(
+            false,
+            self.root(),
+            self.atoms.ESETROOT_PMAP_ID,
+            AtomEnum::PIXMAP,
+            0,
+            1,
+        ).ok()?.reply().ok()?;
+
+        reply.value32().and_then(|mut v| v.next()).filter(|&p| p != 0)
+    }
 }
