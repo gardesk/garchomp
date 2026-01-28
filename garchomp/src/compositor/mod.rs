@@ -1327,10 +1327,52 @@ impl Compositor {
             self.renderer.disable_hdr();
         }
 
+        // Reapply rules to existing windows
+        self.reapply_window_rules();
+
         // Request redraw with new settings
         self.needs_redraw = true;
 
         Ok(())
+    }
+
+    /// Reapply window rules to all existing windows after config reload.
+    fn reapply_window_rules(&mut self) {
+        let lua_config = match &self.lua_config {
+            Some(cfg) => cfg,
+            None => return,
+        };
+
+        let window_ids: Vec<Window> = self.windows.keys().copied().collect();
+        let mut updated_count = 0;
+
+        for window_id in window_ids {
+            if let Some(window) = self.windows.get_mut(&window_id) {
+                let window_type_str = window_type_to_string(window.window_type);
+                let rules = lua_config.find_rules(
+                    window.wm_class.as_deref(),
+                    window.wm_instance.as_deref(),
+                    window.wm_name.as_deref(),
+                    Some(&window_type_str),
+                    window.fullscreen,
+                );
+
+                let new_overrides = build_rule_overrides(&rules);
+                if window.rule_overrides.blur_behind != new_overrides.blur_behind
+                    || window.rule_overrides.shadow != new_overrides.shadow
+                    || window.rule_overrides.opacity != new_overrides.opacity
+                    || window.rule_overrides.corner_radius != new_overrides.corner_radius
+                {
+                    window.rule_overrides = new_overrides;
+                    window.damaged = true;
+                    updated_count += 1;
+                }
+            }
+        }
+
+        if updated_count > 0 {
+            tracing::info!("Reapplied rules to {} windows", updated_count);
+        }
     }
 
     /// Shutdown the compositor cleanly.

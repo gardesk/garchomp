@@ -23,8 +23,11 @@ struct Uniforms {
     corner_radius: f32,
     // Window size in pixels (for corner calculation)
     window_size: vec2<f32>,
-    // Padding for alignment
-    _padding: vec2<f32>,
+    // UV offset and scale for screen-space sampling (blur background)
+    // Default: offset=(0,0), scale=(1,1) for normal texture sampling
+    // For blur: offset=(win_x/vw, win_y/vh), scale=(win_w/vw, win_h/vh)
+    uv_offset: vec2<f32>,
+    uv_scale: vec2<f32>,
 }
 
 @group(0) @binding(0)
@@ -72,7 +75,9 @@ fn sdf_rounded_rect(p: vec2<f32>, size: vec2<f32>, radius: f32) -> f32 {
 
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
-    let color = textureSample(t_diffuse, s_diffuse, in.tex_coords);
+    // Apply UV transform for screen-space sampling (blur backgrounds)
+    let transformed_uv = in.tex_coords * uniforms.uv_scale + uniforms.uv_offset;
+    let color = textureSample(t_diffuse, s_diffuse, transformed_uv);
 
     // Use texture alpha, defaulting to opaque for depth-24 windows
     var base_alpha = color.a;

@@ -38,7 +38,11 @@ pub struct Uniforms {
     pub corner_radius: f32,
     /// Window size in pixels
     pub window_size: [f32; 2],
-    /// Padding for alignment
+    /// UV offset for screen-space sampling (blur backgrounds)
+    pub uv_offset: [f32; 2],
+    /// UV scale for screen-space sampling (blur backgrounds)
+    pub uv_scale: [f32; 2],
+    /// Padding to align to 64 bytes (WGSL uniform buffer alignment)
     pub _padding: [f32; 2],
 }
 
@@ -50,6 +54,8 @@ impl Default for Uniforms {
             opacity: 1.0,
             corner_radius: 0.0,
             window_size: [100.0, 100.0],
+            uv_offset: [0.0, 0.0],
+            uv_scale: [1.0, 1.0],
             _padding: [0.0, 0.0],
         }
     }
@@ -262,12 +268,43 @@ impl CompositePipeline {
         opacity: f32,
         corner_radius: f32,
     ) {
+        // Use default UV transform (identity: offset=0, scale=1)
+        self.update_uniforms_with_uv(
+            queue,
+            uniform_buffer,
+            x, y, width, height,
+            viewport_width, viewport_height,
+            opacity, corner_radius,
+            0.0, 0.0, 1.0, 1.0,
+        );
+    }
+
+    /// Update uniforms with custom UV offset/scale for screen-space blur sampling.
+    pub fn update_uniforms_with_uv(
+        &self,
+        queue: &wgpu::Queue,
+        uniform_buffer: &wgpu::Buffer,
+        x: f32,
+        y: f32,
+        width: f32,
+        height: f32,
+        viewport_width: f32,
+        viewport_height: f32,
+        opacity: f32,
+        corner_radius: f32,
+        uv_offset_x: f32,
+        uv_offset_y: f32,
+        uv_scale_x: f32,
+        uv_scale_y: f32,
+    ) {
         let uniforms = Uniforms {
             transform: [x, y, width, height],
             viewport: [viewport_width, viewport_height],
             opacity,
             corner_radius,
             window_size: [width, height],
+            uv_offset: [uv_offset_x, uv_offset_y],
+            uv_scale: [uv_scale_x, uv_scale_y],
             _padding: [0.0, 0.0],
         };
         queue.write_buffer(uniform_buffer, 0, bytemuck::cast_slice(&[uniforms]));

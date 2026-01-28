@@ -700,6 +700,23 @@ impl Renderer {
                 occlusion_query_set: None,
             });
 
+            // Render root pixmap (wallpaper) as background
+            if let Some((ref bind_group, ref uniform_buffer, tex_w, tex_h)) = self.root_pixmap_data {
+                self.pipeline.update_uniforms(
+                    &self.gpu.queue,
+                    uniform_buffer,
+                    0.0,
+                    0.0,
+                    tex_w as f32,
+                    tex_h as f32,
+                    vw as f32,
+                    vh as f32,
+                    1.0,
+                    0.0,
+                );
+                self.pipeline.render(&mut render_pass, bind_group);
+            }
+
             // Re-render shadows
             for win in windows {
                 if win.shadow_enabled {
@@ -736,9 +753,16 @@ impl Renderer {
 
                 if win.blur_behind {
                     // First draw blurred background in window region
+                    // Sample from blur texture using screen-space UVs
                     if let Some(ref bg) = blur_bind_group {
-                        // Draw blurred background in window region
-                        self.pipeline.update_uniforms(
+                        // Calculate screen-space UV offset and scale
+                        // This maps the quad's 0-1 UVs to the window's screen position
+                        let uv_offset_x = win.x as f32 / vw as f32;
+                        let uv_offset_y = win.y as f32 / vh as f32;
+                        let uv_scale_x = tex_w / vw as f32;
+                        let uv_scale_y = tex_h / vh as f32;
+
+                        self.pipeline.update_uniforms_with_uv(
                             &self.gpu.queue,
                             &blur_uniform_buffer,
                             win.x as f32,
@@ -749,6 +773,10 @@ impl Renderer {
                             vh as f32,
                             1.0, // Opaque blur background
                             win.corner_radius,
+                            uv_offset_x,
+                            uv_offset_y,
+                            uv_scale_x,
+                            uv_scale_y,
                         );
                         self.pipeline.render(&mut render_pass, bg);
                     }
