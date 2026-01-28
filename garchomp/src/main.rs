@@ -8,6 +8,7 @@ mod x11;
 
 use anyhow::{Context, Result};
 use clap::Parser;
+use config::{ConfigEvent, ConfigWatcher};
 use garchomp_ipc::{Request, Response, WindowInfo};
 use nix::poll::{poll, PollFd, PollFlags, PollTimeout};
 use std::os::unix::io::BorrowedFd;
@@ -57,6 +58,20 @@ async fn main() -> Result<()> {
     // Create IPC server
     let mut ipc_server = ipc::IpcServer::new().context("Failed to start IPC server")?;
 
+    // Create config file watcher for hot reload
+    let config_watcher = compositor.config_path().and_then(|path| {
+        match ConfigWatcher::new(path.clone()) {
+            Ok(watcher) => {
+                tracing::info!("Config hot reload enabled for {:?}", path);
+                Some(watcher)
+            }
+            Err(e) => {
+                tracing::warn!("Failed to create config watcher: {}", e);
+                None
+            }
+        }
+    });
+
     tracing::info!(
         "Compositor initialized, tracking {} windows",
         compositor.windows.len()
@@ -66,14 +81,23 @@ async fn main() -> Result<()> {
     let x11_fd = compositor.conn.as_raw_fd();
     let ipc_fd = ipc_server.as_raw_fd();
 
+    // Track gar connection state for sync on reconnect
+    let mut was_connected_to_gar = compositor.is_connected_to_gar();
+
     // Main event loop with proper polling
     while running.load(Ordering::Relaxed) && compositor.running {
-        // Set up poll fds
+        // Set up poll fds - dynamically include gar fd if connected
         // SAFETY: We know these fds are valid for the duration of this loop iteration
-        let mut poll_fds = [
+        let mut poll_fds = vec![
             PollFd::new(unsafe { BorrowedFd::borrow_raw(x11_fd) }, PollFlags::POLLIN),
             PollFd::new(unsafe { BorrowedFd::borrow_raw(ipc_fd) }, PollFlags::POLLIN),
         ];
+
+        // Add gar fd to polling if connected
+        let gar_fd = compositor.gar.as_raw_fd();
+        if let Some(fd) = gar_fd {
+            poll_fds.push(PollFd::new(unsafe { BorrowedFd::borrow_raw(fd) }, PollFlags::POLLIN));
+        }
 
         // Wait for events (16ms timeout for ~60fps rendering, or immediate if redraw needed)
         let timeout = if compositor.needs_redraw() {
@@ -93,6 +117,30 @@ async fn main() -> Result<()> {
         // Handle IPC requests
         while let Some(request) = ipc_server.poll() {
             handle_ipc_request(&mut compositor, request);
+        }
+
+        // Poll gar events
+        while let Some(event) = compositor.gar.poll() {
+            compositor.handle_gar_event(event);
+        }
+
+        // Try to reconnect to gar if disconnected
+        let is_connected = compositor.gar.try_reconnect();
+        if is_connected && !was_connected_to_gar {
+            // Just reconnected - sync workspace state
+            tracing::info!("Reconnected to gar, syncing workspace state");
+            compositor.sync_workspaces_from_gar();
+        }
+        was_connected_to_gar = is_connected;
+
+        // Check for config file changes
+        if let Some(ref watcher) = config_watcher {
+            if let Some(ConfigEvent::Modified) = watcher.poll() {
+                tracing::info!("Config file changed, reloading...");
+                if let Err(e) = compositor.reload_config() {
+                    tracing::error!("Failed to reload config: {}", e);
+                }
+            }
         }
 
         // Render if needed
@@ -203,9 +251,9 @@ fn handle_ipc_request(compositor: &mut compositor::Compositor, request: ipc::Cli
                     override_redirect: tracked.override_redirect,
                     workspace: compositor.workspaces.get_window_workspace(tracked.id),
                     focused,
-                    fullscreen: false, // TODO: track fullscreen state
-                    class: None,       // TODO: get WM_CLASS
-                    title: None,       // TODO: get _NET_WM_NAME
+                    fullscreen: tracked.fullscreen,
+                    class: tracked.wm_class.clone(),
+                    title: tracked.wm_name.clone(),
                 })
             } else {
                 Response::Error {
@@ -229,9 +277,9 @@ fn handle_ipc_request(compositor: &mut compositor::Compositor, request: ipc::Cli
                         override_redirect: w.override_redirect,
                         workspace: compositor.workspaces.get_window_workspace(w.id),
                         focused,
-                        fullscreen: false,
-                        class: None,
-                        title: None,
+                        fullscreen: w.fullscreen,
+                        class: w.wm_class.clone(),
+                        title: w.wm_name.clone(),
                     }
                 })
                 .collect();

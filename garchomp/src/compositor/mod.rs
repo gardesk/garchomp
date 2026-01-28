@@ -247,8 +247,9 @@ impl Compositor {
             }
         }
 
-        // Get window class for rule matching
+        // Get window class and title for rule matching
         let (wm_class, wm_instance) = self.get_window_class(window);
+        let wm_name = self.get_window_name(window);
         let window_type_str = window_type_to_string(window_type);
 
         // Find matching rules and build overrides
@@ -256,7 +257,7 @@ impl Compositor {
             let rules = lua_config.find_rules(
                 wm_class.as_deref(),
                 wm_instance.as_deref(),
-                None, // TODO: Get window title
+                wm_name.as_deref(),
                 Some(&window_type_str),
                 fullscreen,
             );
@@ -292,6 +293,9 @@ impl Compositor {
             rule_overrides,
             fullscreen,
             lua_animation: None,
+            wm_class,
+            wm_instance,
+            wm_name,
         };
 
         tracing::debug!(
@@ -323,19 +327,60 @@ impl Compositor {
 
     /// Start a Lua animation for a window if one is configured.
     fn start_lua_animation(&mut self, window: Window, trigger: AnimationTrigger) {
-        // Check if we have an animation configured for this trigger
-        if let Some(ref lua_config) = self.lua_config {
-            if let Some(anim) = lua_config.get_animation(trigger) {
-                let duration = std::time::Duration::from_secs_f32(anim.duration);
-                let easing = Easing::from_name(&anim.curve);
+        if self.lua_config.is_none() {
+            return;
+        }
 
-                if let Some(tracked) = self.windows.get_mut(&window) {
-                    tracked.start_lua_animation(trigger, duration, easing);
-                    tracing::debug!(
-                        "Started {:?} animation for window {:#x} ({}s, {:?})",
-                        trigger, window, anim.duration, easing
-                    );
-                }
+        // Get window properties for rule matching
+        let (wm_class, wm_instance) = self.get_window_class(window);
+        let (window_type, fullscreen) = if let Some(tracked) = self.windows.get(&window) {
+            (Some(window_type_to_string(tracked.window_type)), tracked.fullscreen)
+        } else {
+            (None, false)
+        };
+
+        let lua_config = self.lua_config.as_ref().unwrap();
+
+        // Check for rule-specific animation override first
+        let rules = lua_config.find_rules(
+            wm_class.as_deref(),
+            wm_instance.as_deref(),
+            None,
+            window_type.as_deref(),
+            fullscreen,
+        );
+
+        // Look for animation override in matched rules
+        let rule_animation = rules.iter().find_map(|r| {
+            match trigger {
+                AnimationTrigger::WindowOpen => r.open_animation.as_ref(),
+                AnimationTrigger::WindowClose => r.close_animation.as_ref(),
+                _ => None,
+            }
+        });
+
+        // Use rule animation if found, otherwise fall back to global
+        if let Some(rule_anim) = rule_animation {
+            let duration = std::time::Duration::from_secs_f32(rule_anim.duration);
+            let easing = Easing::from_name(&rule_anim.curve);
+
+            if let Some(tracked) = self.windows.get_mut(&window) {
+                tracked.start_lua_animation(trigger, duration, easing);
+                tracing::debug!(
+                    "Started {:?} rule animation for window {:#x} ({}s)",
+                    trigger, window, rule_anim.duration
+                );
+            }
+        } else if let Some(anim) = lua_config.get_animation(trigger) {
+            let duration = std::time::Duration::from_secs_f32(anim.duration);
+            let easing = Easing::from_name(&anim.curve);
+
+            if let Some(tracked) = self.windows.get_mut(&window) {
+                tracked.start_lua_animation(trigger, duration, easing);
+                tracing::debug!(
+                    "Started {:?} global animation for window {:#x} ({}s)",
+                    trigger, window, anim.duration
+                );
             }
         }
     }
@@ -743,6 +788,47 @@ impl Compositor {
         }
     }
 
+    /// Get window title from _NET_WM_NAME (preferred) or WM_NAME (fallback).
+    fn get_window_name(&self, window: Window) -> Option<String> {
+        // Try _NET_WM_NAME first (UTF-8)
+        if let Ok(cookie) = self.conn.conn.get_property(
+            false,
+            window,
+            self.conn.atoms._NET_WM_NAME,
+            self.conn.atoms.UTF8_STRING,
+            0,
+            1024,
+        ) {
+            if let Ok(reply) = cookie.reply() {
+                if !reply.value.is_empty() {
+                    if let Ok(name) = std::str::from_utf8(&reply.value) {
+                        return Some(name.trim_end_matches('\0').to_string());
+                    }
+                }
+            }
+        }
+
+        // Fall back to WM_NAME (Latin-1, but often ASCII)
+        if let Ok(cookie) = self.conn.conn.get_property(
+            false,
+            window,
+            AtomEnum::WM_NAME,
+            AtomEnum::STRING,
+            0,
+            1024,
+        ) {
+            if let Ok(reply) = cookie.reply() {
+                if !reply.value.is_empty() {
+                    if let Ok(name) = std::str::from_utf8(&reply.value) {
+                        return Some(name.trim_end_matches('\0').to_string());
+                    }
+                }
+            }
+        }
+
+        None
+    }
+
     /// Render a frame if needed.
     pub fn render(&mut self) -> Result<()> {
         if !self.needs_redraw {
@@ -827,6 +913,35 @@ impl Compositor {
                         w.effective_corner_radius()
                     };
 
+                    // Calculate workspace transition offset
+                    let screen = self.conn.screen();
+                    let screen_width = screen.width_in_pixels as f32;
+                    let screen_height = screen.height_in_pixels as f32;
+
+                    let transition_offset = if let Some(ref transition) = self.workspaces.transition {
+                        if let Some(ws) = window_ws {
+                            if ws == transition.from {
+                                // Window on "from" workspace: slide out
+                                transition.from_offset(screen_width, screen_height)
+                            } else if ws == transition.to {
+                                // Window on "to" workspace: slide in
+                                transition.to_offset(screen_width, screen_height)
+                            } else {
+                                (0.0, 0.0)
+                            }
+                        } else {
+                            (0.0, 0.0) // Untracked windows don't move
+                        }
+                    } else {
+                        (0.0, 0.0)
+                    };
+
+                    // Combine Lua transform offset with transition offset
+                    let final_offset = (
+                        lua_transform.offset.0 + transition_offset.0,
+                        lua_transform.offset.1 + transition_offset.1,
+                    );
+
                     windows.push(WindowRenderInfo {
                         id: w.id,
                         pixmap: w.pixmap.unwrap() as u64,
@@ -840,7 +955,7 @@ impl Compositor {
                         blur_behind: w.should_have_blur() && self.effects.blur_active(),
                         focused,
                         scale: lua_transform.scale,
-                        offset: lua_transform.offset,
+                        offset: final_offset,
                     });
                 }
             }
@@ -884,6 +999,32 @@ impl Compositor {
                     w.effective_corner_radius()
                 };
 
+                // Calculate workspace transition offset
+                let screen = self.conn.screen();
+                let screen_width = screen.width_in_pixels as f32;
+                let screen_height = screen.height_in_pixels as f32;
+
+                let transition_offset = if let Some(ref transition) = self.workspaces.transition {
+                    if let Some(ws) = window_ws {
+                        if ws == transition.from {
+                            transition.from_offset(screen_width, screen_height)
+                        } else if ws == transition.to {
+                            transition.to_offset(screen_width, screen_height)
+                        } else {
+                            (0.0, 0.0)
+                        }
+                    } else {
+                        (0.0, 0.0)
+                    }
+                } else {
+                    (0.0, 0.0)
+                };
+
+                let final_offset = (
+                    lua_transform.offset.0 + transition_offset.0,
+                    lua_transform.offset.1 + transition_offset.1,
+                );
+
                 windows.push(WindowRenderInfo {
                     id: w.id,
                     pixmap: w.pixmap.unwrap() as u64,
@@ -897,7 +1038,7 @@ impl Compositor {
                     blur_behind: w.should_have_blur() && self.effects.blur_active(),
                     focused,
                     scale: lua_transform.scale,
-                    offset: lua_transform.offset,
+                    offset: final_offset,
                 });
             }
         }
@@ -1060,6 +1201,62 @@ impl Compositor {
     /// Check if connected to gar.
     pub fn is_connected_to_gar(&self) -> bool {
         self.gar.is_connected()
+    }
+
+    /// Sync workspace state by re-reading _NET_WM_DESKTOP for all windows.
+    /// Called on gar reconnect to ensure we have accurate workspace assignments.
+    pub fn sync_workspaces_from_gar(&mut self) {
+        tracing::info!("Syncing workspace state from X11 properties");
+
+        // Query current workspace from _NET_CURRENT_DESKTOP
+        if let Ok(cookie) = self.conn.conn.get_property(
+            false,
+            self.conn.root(),
+            self.conn.atoms._NET_CURRENT_DESKTOP,
+            AtomEnum::CARDINAL,
+            0,
+            1,
+        ) {
+            if let Ok(reply) = cookie.reply() {
+                if let Some(workspace) = reply.value32().and_then(|mut v| v.next()) {
+                    let ws = workspace as usize;
+                    if ws != self.workspaces.current {
+                        tracing::debug!("Synced current workspace: {} -> {}", self.workspaces.current, ws);
+                        self.workspaces.set_current(ws);
+                    }
+                }
+            }
+        }
+
+        // Re-read _NET_WM_DESKTOP for all tracked windows
+        let window_ids: Vec<Window> = self.windows.keys().copied().collect();
+        for window_id in window_ids {
+            if let Ok(cookie) = self.conn.conn.get_property(
+                false,
+                window_id,
+                self.conn.atoms._NET_WM_DESKTOP,
+                AtomEnum::CARDINAL,
+                0,
+                1,
+            ) {
+                if let Ok(reply) = cookie.reply() {
+                    if let Some(workspace) = reply.value32().and_then(|mut v| v.next()) {
+                        // 0xFFFFFFFF means "all workspaces" (sticky)
+                        if workspace != 0xFFFFFFFF {
+                            self.workspaces.assign_window(window_id, workspace as usize);
+                        }
+                    }
+                }
+            }
+        }
+
+        self.needs_redraw = true;
+        tracing::info!("Workspace sync complete, current: {}", self.workspaces.current);
+    }
+
+    /// Get the path to the current config file.
+    pub fn config_path(&self) -> Option<std::path::PathBuf> {
+        self.lua_config.as_ref().map(|lua| lua.config_path().clone())
     }
 
     /// Reload configuration from Lua file.
