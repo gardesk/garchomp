@@ -1058,14 +1058,11 @@ impl Compositor {
             }
         }
 
-        // Keep redrawing while animations are active
-        if has_active_animations {
-            self.needs_redraw = true;
-        }
-
         // Render the windows
         self.renderer.render_windows(&windows)?;
-        self.needs_redraw = false;
+
+        // Keep redrawing while animations are active, otherwise clear the flag
+        self.needs_redraw = has_active_animations;
 
         // Clear damage flags on windows
         for window in self.windows.values_mut() {
