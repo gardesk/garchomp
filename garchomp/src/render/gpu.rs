@@ -223,8 +223,23 @@ impl GpuContext {
     }
 
     /// Begin a frame - get the current surface texture.
-    pub fn begin_frame(&self) -> Result<wgpu::SurfaceTexture> {
-        Ok(self.surface.get_current_texture()?)
+    /// Handles surface lost/outdated by reconfiguring.
+    pub fn begin_frame(&mut self) -> Result<wgpu::SurfaceTexture> {
+        match self.surface.get_current_texture() {
+            Ok(frame) => Ok(frame),
+            Err(wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated) => {
+                // Surface was lost (e.g., screen sleep) or outdated - reconfigure and retry
+                tracing::info!("Surface lost/outdated, reconfiguring...");
+                self.surface.configure(&self.device, &self.surface_config);
+                Ok(self.surface.get_current_texture()?)
+            }
+            Err(wgpu::SurfaceError::Timeout) => {
+                // Timeout waiting for frame - skip this frame
+                tracing::warn!("Surface timeout, skipping frame");
+                Err(GpuError::Surface(wgpu::SurfaceError::Timeout))
+            }
+            Err(e) => Err(e.into()),
+        }
     }
 
     /// Create a command encoder.
