@@ -265,6 +265,11 @@ impl Compositor {
         let wm_name = self.get_window_name(window);
         let window_type_str = window_type_to_string(window_type);
 
+        tracing::debug!(
+            "Window {:#x} class={:?} instance={:?} type={}",
+            window, wm_class, wm_instance, window_type_str
+        );
+
         // Find matching rules and build overrides
         let rule_overrides = if let Some(ref lua_config) = self.lua_config {
             let rules = lua_config.find_rules(
@@ -274,10 +279,19 @@ impl Compositor {
                 Some(&window_type_str),
                 fullscreen,
             );
+            tracing::debug!(
+                "Window {:#x} matched {} rules, opacity override={:?}",
+                window, rules.len(), rules.iter().filter_map(|r| r.opacity).last()
+            );
             build_rule_overrides(&rules)
         } else {
             WindowRuleOverrides::default()
         };
+
+        tracing::debug!(
+            "Window {:#x} final rule_overrides: opacity={:?}",
+            window, rule_overrides.opacity
+        );
 
         // Create animation state, starting fade-in if enabled
         let mut animations = WindowAnimations::new();
@@ -1166,9 +1180,10 @@ impl Compositor {
         self.active_window = new;
 
         // Trigger unfocus animation on old window
+        // Skip windows with opacity rule override - they maintain their configured opacity
         if let Some(old_id) = old {
             if let Some(tracked) = self.windows.get_mut(&old_id) {
-                if self.effects.fade_enabled {
+                if self.effects.fade_enabled && tracked.rule_overrides.opacity.is_none() {
                     // Start a subtle dim animation for unfocused window
                     tracked.animations.opacity = Some(Animation::new(
                         1.0,
@@ -1181,9 +1196,10 @@ impl Compositor {
         }
 
         // Trigger focus animation on new window
+        // Skip windows with opacity rule override - they maintain their configured opacity
         if let Some(new_id) = new {
             if let Some(tracked) = self.windows.get_mut(&new_id) {
-                if self.effects.fade_enabled {
+                if self.effects.fade_enabled && tracked.rule_overrides.opacity.is_none() {
                     // Brighten focused window
                     tracked.animations.opacity = Some(Animation::new(
                         self.effects.opacity_unfocused,
