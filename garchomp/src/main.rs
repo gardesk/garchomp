@@ -44,6 +44,16 @@ async fn main() -> Result<()> {
     // Initialize logging
     init_logging(cli.verbose);
 
+    // Set panic hook to log panics before exit
+    std::panic::set_hook(Box::new(|info| {
+        let backtrace = std::backtrace::Backtrace::force_capture();
+        tracing::error!("PANIC: {}", info);
+        tracing::error!("Backtrace:\n{}", backtrace);
+        // Also write to stderr in case tracing isn't working
+        eprintln!("PANIC: {}", info);
+        eprintln!("Backtrace:\n{}", backtrace);
+    }));
+
     tracing::info!("garchomp compositor starting");
 
     // Set up signal handling
