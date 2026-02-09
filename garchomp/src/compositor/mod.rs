@@ -25,6 +25,7 @@ use x11rb::protocol::xproto::{
     DestroyNotifyEvent, EventMask, MapNotifyEvent, PropertyNotifyEvent,
     UnmapNotifyEvent, Window,
 };
+use x11rb::protocol::randr::{ConnectionExt as RandrConnectionExt, NotifyMask as RandrNotifyMask};
 use x11rb::protocol::Event;
 
 #[derive(Error, Debug)]
@@ -101,6 +102,14 @@ impl Compositor {
             conn.root(),
             &ChangeWindowAttributesAux::new().event_mask(event_mask),
         )?;
+
+        // Subscribe to RandR screen change events (for rotation/resolution changes)
+        if let Err(e) = conn.conn.randr_select_input(
+            conn.root(),
+            RandrNotifyMask::SCREEN_CHANGE,
+        ) {
+            tracing::warn!("Failed to subscribe to RandR events: {}", e);
+        }
 
         conn.flush()?;
 
@@ -475,6 +484,14 @@ impl Compositor {
             Event::ConfigureNotify(e) => self.handle_configure(e)?,
             Event::PropertyNotify(e) => self.handle_property(e)?,
             Event::DamageNotify(e) => self.handle_damage(e),
+            Event::RandrScreenChangeNotify(e) => {
+                tracing::info!(
+                    "RandR screen change: {}x{} -> resizing compositor",
+                    e.width, e.height
+                );
+                self.renderer.resize(e.width as u32, e.height as u32);
+                self.needs_redraw = true;
+            }
             Event::Error(e) => {
                 tracing::warn!("X11 error: {:?}", e);
             }
