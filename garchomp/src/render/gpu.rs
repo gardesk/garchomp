@@ -122,13 +122,17 @@ impl GpuContext {
             adapter_info.backend
         );
 
-        // Request device with default limits
+        // Request device - use adapter's actual max texture size for multi-monitor setups
+        let adapter_limits = adapter.limits();
         let (device, queue) = adapter
             .request_device(
                 &wgpu::DeviceDescriptor {
                     label: Some("garchomp"),
                     required_features: wgpu::Features::empty(),
-                    required_limits: wgpu::Limits::default(),
+                    required_limits: wgpu::Limits {
+                        max_texture_dimension_2d: adapter_limits.max_texture_dimension_2d,
+                        ..wgpu::Limits::default()
+                    },
                     memory_hints: wgpu::MemoryHints::Performance,
                 },
                 None,
