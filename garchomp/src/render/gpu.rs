@@ -93,9 +93,9 @@ impl GpuContext {
 
         tracing::info!("Opened Xlib display for GPU, screen {}", screen);
 
-        // Create wgpu instance - try GL backend to debug Vulkan issues
+        // Create wgpu instance - prefer Vulkan, fall back to GL
         let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
-            backends: wgpu::Backends::GL,  // Force GL for debugging
+            backends: wgpu::Backends::VULKAN | wgpu::Backends::GL,
             ..Default::default()
         });
 
