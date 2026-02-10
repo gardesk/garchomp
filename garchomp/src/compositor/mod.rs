@@ -924,22 +924,11 @@ impl Compositor {
         for window_id in stacking_order {
             if let Some(w) = self.windows.get(&window_id) {
                 if w.mapped && w.pixmap.is_some() {
-                    // Check workspace visibility - only render windows on current workspace,
-                    // windows in transition, or windows not assigned to any workspace (docks, etc.)
+                    // Render all mapped windows - the WM manages visibility via map/unmap.
+                    // With per-monitor workspaces, multiple workspaces are visible
+                    // simultaneously, so we can't filter by a single "current" workspace.
+                    // Workspace info is still used for transition animation offsets below.
                     let window_ws = self.workspaces.get_window_workspace(w.id);
-                    let should_render = match window_ws {
-                        None => true, // Not tracked by workspace (override-redirect, docks)
-                        Some(ws) => {
-                            ws == self.workspaces.current ||
-                            self.workspaces.transition.as_ref().map_or(false, |t| {
-                                ws == t.from || ws == t.to
-                            })
-                        }
-                    };
-
-                    if !should_render {
-                        continue;
-                    }
 
                     let focused = self.is_window_focused(w.id);
                     // Get Lua animation transform
